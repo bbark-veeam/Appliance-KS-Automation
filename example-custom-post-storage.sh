@@ -19,12 +19,13 @@
 #         networking is up — mirroring the stock `start-iscsid-once.service`.
 #   The vmware-proxy stock %post already enables iscsid, loads the `nvme-tcp`
 #   module, and enables multipathd; this snippet only ADDS your connection config.
-# * This targets **Direct SAN access** — the proxy reads VM data straight from the
-#   production SAN LUNs over iSCSI / NVMe-TCP. That mode has **no specific VBR
+# * Headline use case: **Direct SAN access** — the proxy reads VM data straight
+#   from the production SAN LUNs over iSCSI / NVMe-TCP. That mode has **no VBR-side
 #   configuration**: VBR auto-selects "Direct storage access" once the proxy's OS
 #   can see the LUNs, so the whole job is OS-level connectivity — exactly what this
-#   snippet stages. Contrast **Backup from Storage Snapshots (BfSS)**, which you
-#   configure IN VBR (add the storage system there) and which does NOT need this.
+#   snippet stages. (**Backup from Storage Snapshots (BfSS)** can also have OS-level
+#   connection requirements — e.g. reaching the snapshot LUNs the array presents to
+#   the proxy — but its array integration is configured IN VBR, not here.)
 # * Do NOT use this to set the network / domain / password policy / encryption —
 #   the appliance manages those itself. Storage initiator config is fair game.
 # * Portals, IQNs/NQNs, and CHAP creds are DEPLOYMENT-SPECIFIC — there is no safe
