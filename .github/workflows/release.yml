@@ -2,31 +2,44 @@ name: Release
 
 # Cut a release by pushing a version tag that matches the VERSION file, e.g.:
 #   git tag v1.1.2 && git push origin v1.1.2
-# This builds the customer kit with package-kit.sh and publishes a GitHub
-# Release with the .zip attached. Release notes are pulled from WHATS-NEW.md.
+# Or re-run a release for an existing tag from the Actions tab
+# ("Run workflow" -> enter the tag, e.g. v1.1.2).
+#
+# Builds the customer kit with package-kit.sh and publishes (or updates) a
+# GitHub Release with the .zip attached. Release notes = the Quick Start
+# (.github/RELEASE_QUICKSTART.md) followed by the matching WHATS-NEW.md section.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build a release for, e.g. v1.1.2'
+        required: true
 
 permissions:
-  contents: write   # required to create the release
+  contents: write   # required to create/update the release
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout (tag)
         uses: actions/checkout@v4
+        with:
+          # On a tag push this is the tag; on manual dispatch, the entered tag.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Verify tag matches VERSION
         run: |
           VER="$(tr -d '[:space:]' < VERSION)"
-          TAG="${GITHUB_REF_NAME#v}"
-          echo "VERSION file: $VER   |   pushed tag: $GITHUB_REF_NAME (-> $TAG)"
+          REF="${{ inputs.tag || github.ref_name }}"
+          TAG="${REF#v}"
+          echo "VERSION file: $VER   |   tag: $REF (-> $TAG)"
           if [ "$VER" != "$TAG" ]; then
-            echo "::error::Tag '$GITHUB_REF_NAME' does not match VERSION ($VER). Bump VERSION (and add a WHATS-NEW.md entry) or retag."
+            echo "::error::Tag '$REF' does not match VERSION ($VER). Bump VERSION (and add a WHATS-NEW.md entry) or retag."
             exit 1
           fi
 
@@ -56,13 +69,20 @@ jobs:
           fi
           echo "----- release notes -----"; cat RELEASE_NOTES.md
 
-      - name: Publish release
+      - name: Publish or update release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VER="$(tr -d '[:space:]' < VERSION)"
           ASSET="builds/Veeam-Appliance-Kickstart-Kit-v${VER}.zip"
           test -f "$ASSET" || { echo "::error::Expected asset not found: $ASSET"; exit 1; }
-          gh release create "v${VER}" "$ASSET" \
-            --title "v${VER}" \
-            --notes-file RELEASE_NOTES.md
+          if gh release view "v${VER}" >/dev/null 2>&1; then
+            echo "Release v${VER} exists — updating notes and asset."
+            gh release edit "v${VER}" --title "v${VER}" --notes-file RELEASE_NOTES.md
+            gh release upload "v${VER}" "$ASSET" --clobber
+          else
+            echo "Creating release v${VER}."
+            gh release create "v${VER}" "$ASSET" \
+              --title "v${VER}" \
+              --notes-file RELEASE_NOTES.md
+          fi
