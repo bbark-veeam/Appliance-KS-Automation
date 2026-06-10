@@ -1,0 +1,40 @@
+# ── Internal / never-distribute ──────────────────────────────────────────
+# Project-reference-only material; never ships to GitHub or customers.
+internal/
+
+# Build / release artifacts (package-kit.sh: "Do NOT ship builds/").
+# Use GitHub Releases for distributable kits instead of committing them.
+builds/
+
+# Vendor stock baseline (Veeam's original kickstart/grub files, v13.0.2.x).
+# Excluded from the customer allowlist; kept local only.
+baseline-stock/
+
+# Archived earlier-release snapshot — old versions live in git history/tags.
+v1.0.x/
+
+# ── Generated secrets ────────────────────────────────────────────────────
+# generate-secrets.sh fills <<GENERATE_...>> tokens IN PLACE and keeps a
+# timestamped backup. Never commit the backups or any filled-in copies.
+# NOTE: only commit unattended-block.tmpl while it still holds <<...>> tokens.
+*.bak
+*.bak.*
+*.filled
+secrets.env
+*.secret
+
+# ── Built images ─────────────────────────────────────────────────────────
+*.iso
+*.img
+
+# ── OS / editor cruft ────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/

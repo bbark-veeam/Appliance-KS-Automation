@@ -1,0 +1,76 @@
+
+
+###############################################################################
+# UNATTENDED DEPLOYMENT CONFIGURATION
+# -----------------------------------------------------------------------------
+# Added block — NOT part of the stock Veeam kickstart. The lines ABOVE this block
+# are the stock kickstart, extracted verbatim from the SOURCE ISO at build time,
+# so they always match whatever Veeam build you fed in (version-agnostic). This
+# block is inserted at the end of the stock chroot %post (before "# post end").
+#
+# Mechanism is per Veeam documentation:
+#   helpcenter.veeam.com/docs/vbr/em/deployment_linux_silent_deploy_configure.html
+#
+# Pre-defines the veeamadmin and veeamso accounts and applies them on the FIRST
+# boot via veeamhostmanager, then removes the plaintext answer file.
+#
+# >>> Filled by the build tooling: <<<
+#   - generate-secrets.sh  -> the <<GENERATE_...>> values (fresh per-deployment
+#     MFA keys + SO recovery token; never preset, so each org gets unique keys).
+#   - make-golden-iso.sh / hand edit -> the <<SET_...>> tokens (passwords + NTP)
+#     and the isMfaEnabled / isEnabled flags.
+###############################################################################
+
+log "Unattended: disable Veeam initialization wizard"
+mkdir -p /etc/veeam
+touch /etc/veeam/cockpit_auto_test_disable_init
+
+log "Unattended: write first-boot answer file /etc/veeam/vbr_init.cfg"
+cat << 'VEEAM_INIT_CFG_EOF' >> /etc/veeam/vbr_init.cfg
+# veeamadmin: full admin account. MFA key baked in; enforcement set per build
+# choice (isMfaEnabled). Hardened-repo forces this to true.
+veeamadmin.password=<<SET_VEEAMADMIN_PASSWORD>>
+veeamadmin.mfaSecretKey=<<GENERATE_VEEAMADMIN_MFA>>
+veeamadmin.isMfaEnabled=false
+
+# veeamso: Security Officer. MFA ENFORCED at first login (Veeam default).
+# The SO must enroll the secret key below in an authenticator app on first use.
+veeamso.password=<<SET_VEEAMSO_PASSWORD>>
+veeamso.mfaSecretKey=<<GENERATE_VEEAMSO_MFA>>
+veeamso.isMfaEnabled=true
+veeamso.recoveryToken=<<GENERATE_VEEAMSO_RECOVERY_TOKEN>>
+veeamso.isEnabled=true
+
+ntp.servers=<<SET_NTP_SERVER>>
+ntp.runSync=true
+
+vbr_control.runInitIso=true
+vbr_control.runStart=true
+VEEAM_INIT_CFG_EOF
+chmod 600 /etc/veeam/vbr_init.cfg
+
+log "Unattended: install first-boot init script /etc/veeam/veeam-init.sh"
+cat << 'VEEAM_INIT_SH_EOF' >> /etc/veeam/veeam-init.sh
+#!/bin/bash
+set -eE -u -o pipefail
+/opt/veeam/hostmanager/veeamhostmanager --apply_init_config /etc/veeam/vbr_init.cfg
+# Hardening (beyond Veeam's documented script): remove plaintext credentials
+# from disk once they have been applied.
+rm -f /etc/veeam/vbr_init.cfg
+systemctl disable veeam-init
+VEEAM_INIT_SH_EOF
+chmod +x /etc/veeam/veeam-init.sh
+
+log "Unattended: register first-boot service veeam-init.service"
+cat << 'VEEAM_INIT_SERVICE_EOF' >> /etc/systemd/system/veeam-init.service
+[Unit]
+Description=One-shot daemon to run /opt/veeam/hostmanager/veeamhostmanager at next boot
+[Service]
+Type=oneshot
+ExecStart=/etc/veeam/veeam-init.sh
+RemainAfterExit=no
+[Install]
+WantedBy=multi-user.target
+VEEAM_INIT_SERVICE_EOF
+systemctl enable veeam-init.service
+
