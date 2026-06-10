@@ -145,7 +145,7 @@ Everything below ships in the kit — this is the complete contents of the custo
 |------|---------|
 | [unattended-block.tmpl](unattended-block.tmpl) | The role-agnostic unattended block (the veeamadmin/veeamso settings) with `<<...>>` placeholders. The build inserts it into the stock kickstart it extracts from your source ISO. The **only** config file you fill. |
 | [example-custom-post-firewall.sh](example-custom-post-firewall.sh) | Starter template for the `--custom-post` hook — firewalld rules with placeholder ports (see "Custom %post"). Optional; copy + edit. |
-| [example-custom-post-storage.sh](example-custom-post-storage.sh) | Starter template for the `--custom-post` hook — vmware-proxy iSCSI / NVMe-TCP / multipath connection prep with placeholder portals/IQNs/NQNs (see "Custom %post"). Optional; copy + edit. |
+| [example-custom-post-storage.sh](example-custom-post-storage.sh) | Starter template for the `--custom-post` hook — vmware-proxy Direct SAN access prep (OS-level iSCSI / NVMe-TCP / multipath connectivity, no VBR-side config; unlike BfSS) with placeholder portals/IQNs/NQNs (see "Custom %post"). Optional; copy + edit. |
 
 **Docs & metadata**
 | File | Purpose |
@@ -340,8 +340,9 @@ sudo ./build-appliance-iso.sh --role proxy --custom-post ./my-firewall.sh /path/
 ```
 `make-golden-iso.sh` also prompts for it (Step 4b). Two starter templates are included:
 - **`example-custom-post-firewall.sh`** — firewalld rules, placeholder ports.
-- **`example-custom-post-storage.sh`** — **vmware-proxy** iSCSI / NVMe-TCP / multipath
-  connection prep, placeholder portals/IQNs/NQNs.
+- **`example-custom-post-storage.sh`** — **vmware-proxy** Direct SAN access prep
+  (OS-level iSCSI / NVMe-TCP / multipath connectivity to the production LUNs; the
+  case with **no VBR-side config**, unlike BfSS), placeholder portals/IQNs/NQNs.
 
 > ⚠️ **Unsupported / at your own risk**, and additive only. Key points:
 > - It runs at **install time, where service daemons aren't running** and there's no
