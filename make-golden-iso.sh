@@ -213,6 +213,22 @@ while true; do
 done
 CPOPT=(); [ -n "$CUSTOM_POST" ] && CPOPT=(--custom-post "$CUSTOM_POST")
 
+# ---- 4c. guard: VBR-API call in custom %post while veeamadmin MFA is enabled --
+# Best-effort detection of a VBR REST/cmdlet call in the snippet. Unattended API
+# auth can't clear an MFA challenge, so it would fail at first boot. Caught HERE,
+# before Step 5 generates/writes anything, so declining is a clean stop (no
+# backup, no filled block, no ISO — nothing to clean up).
+if [ -n "$CUSTOM_POST" ] && [ "$ADMIN_MFA_ENABLED" = true ] \
+   && grep -qiE '(/api/v1/|oauth2/token|:9419|Install-VBRLicense|Connect-VBRServer)' "$CUSTOM_POST"; then
+  echo
+  echo "  ⚠️  Your custom %post appears to call the VBR API/cmdlets, but veeamadmin MFA is"
+  echo "      ENABLED. Unattended API auth must clear an MFA challenge, so it will likely FAIL"
+  echo "      at first boot unless the snippet computes the TOTP from the baked-in secret."
+  echo "      Simplest fix: deploy with veeamadmin MFA disabled, then enroll/enable it after."
+  read -rp "  Continue with the build anyway? [Y/N] (Default behavior is No — stop) " go || die "input ended"
+  [[ "$go" =~ ^[Yy]$ ]] || die "stopped before generating secrets or building — nothing was created, nothing to clean up. Re-run with veeamadmin MFA disabled, or adjust the custom %post."
+fi
+
 # ---- 5. generate (as needed) + write the kickstart --------------------------
 echo
 echo "Step 5 — writing $KSNAME"

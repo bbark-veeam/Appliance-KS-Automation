@@ -179,6 +179,18 @@ if problems:
     sys.exit(1)
 PY
 
+# Heads-up (non-blocking): a custom %post that calls the VBR API/cmdlets can't
+# authenticate unattended while veeamadmin MFA is enabled (the token flow hits an
+# MFA challenge). This engine stays non-interactive (CI / remote builds), so it
+# only WARNS; the guided make-golden-iso.sh prompts (default: stop) for this case.
+if [ -n "$CUSTOM_POST" ] && grep -qE '^veeamadmin\.isMfaEnabled=true' "$BLOCK_FILE" \
+   && grep -qiE '(/api/v1/|oauth2/token|:9419|Install-VBRLicense|Connect-VBRServer)' "$CUSTOM_POST"; then
+  echo "WARNING: --custom-post looks like it calls the VBR API/cmdlets, but veeamadmin MFA" >&2
+  echo "         is ENABLED in the block — unattended API auth will hit an MFA challenge and" >&2
+  echo "         likely fail at first boot. Deploy with veeamadmin MFA disabled (enable it" >&2
+  echo "         after), or have the snippet compute the TOTP from the baked-in secret." >&2
+fi
+
 echo "Kit version    : $KIT_VERSION"
 echo "Role           : $ROLE"
 echo "Source ISO     : $SRC_ISO"

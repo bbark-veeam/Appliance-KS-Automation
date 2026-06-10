@@ -353,6 +353,12 @@ sudo ./build-appliance-iso.sh --role proxy --custom-post ./my-firewall.sh /path/
 >   template, which mirrors the stock `start-iscsid-once.service` pattern).
 > - **Don't** use it for **network / domain / password-policy / encryption** — the
 >   appliance manages those itself, so changing them here will conflict.
+> - **Calling the VBR API/cmdlets** (e.g. `Install-VBRLicense`, `POST /api/v1/...`) at
+>   first boot needs to authenticate — and with **veeamadmin MFA enabled** the token flow
+>   hits an MFA challenge it can't clear unattended. Deploy with **veeamadmin MFA disabled**
+>   (enable/enroll it after), or have the snippet compute the TOTP from the baked-in secret.
+>   The guided builder **detects this and prompts (default: stop)**; the standalone build
+>   prints a warning.
 > - **If a build or install fails, reproduce WITHOUT `--custom-post` first** to confirm
 >   it's your snippet vs. the kit.
 
