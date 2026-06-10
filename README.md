@@ -145,6 +145,7 @@ Everything below ships in the kit — this is the complete contents of the custo
 |------|---------|
 | [unattended-block.tmpl](unattended-block.tmpl) | The role-agnostic unattended block (the veeamadmin/veeamso settings) with `<<...>>` placeholders. The build inserts it into the stock kickstart it extracts from your source ISO. The **only** config file you fill. |
 | [example-custom-post-firewall.sh](example-custom-post-firewall.sh) | Starter template for the `--custom-post` hook — firewalld rules with placeholder ports (see "Custom %post"). Optional; copy + edit. |
+| [example-custom-post-storage.sh](example-custom-post-storage.sh) | Starter template for the `--custom-post` hook — vmware-proxy iSCSI / NVMe-TCP / multipath connection prep with placeholder portals/IQNs/NQNs (see "Custom %post"). Optional; copy + edit. |
 
 **Docs & metadata**
 | File | Purpose |
@@ -337,13 +338,18 @@ block:
 ```bash
 sudo ./build-appliance-iso.sh --role proxy --custom-post ./my-firewall.sh /path/to/ISO
 ```
-`make-golden-iso.sh` also prompts for it (Step 4b). A starter template is included:
-**`example-custom-post-firewall.sh`** (firewalld rules, placeholder ports).
+`make-golden-iso.sh` also prompts for it (Step 4b). Two starter templates are included:
+- **`example-custom-post-firewall.sh`** — firewalld rules, placeholder ports.
+- **`example-custom-post-storage.sh`** — **vmware-proxy** iSCSI / NVMe-TCP / multipath
+  connection prep, placeholder portals/IQNs/NQNs.
 
 > ⚠️ **Unsupported / at your own risk**, and additive only. Key points:
-> - It runs at **install time, where firewalld isn't running** — use
->   **`firewall-offline-cmd`** (not `firewall-cmd`). The stock kickstart already sets
->   the default zone to **`drop`**, so you're *adding* allowed ports on top.
+> - It runs at **install time, where service daemons aren't running** and there's no
+>   network yet. For firewall, use **`firewall-offline-cmd`** (not `firewall-cmd`); the
+>   stock kickstart already sets the default zone to **`drop`**, so you're *adding*
+>   allowed ports on top. For storage, don't run live `iscsiadm --login` / `nvme connect`
+>   here — write persistent config and/or a **first-boot one-shot** (see the storage
+>   template, which mirrors the stock `start-iscsid-once.service` pattern).
 > - **Don't** use it for **network / domain / password-policy / encryption** — the
 >   appliance manages those itself, so changing them here will conflict.
 > - **If a build or install fails, reproduce WITHOUT `--custom-post` first** to confirm

@@ -33,7 +33,7 @@ fi
 CUST="VERSION LICENSE DISCLAIMER.md WHATS-NEW.md README.md CREDENTIALS.md \
 unattended-block.tmpl \
 make-golden-iso.sh generate-secrets.sh build-appliance-iso.sh check-credentials.sh \
-make-golden-remote.ps1 example-custom-post-firewall.sh"
+make-golden-remote.ps1 example-custom-post-firewall.sh example-custom-post-storage.sh"
 
 stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT
 
