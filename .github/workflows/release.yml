@@ -35,17 +35,24 @@ jobs:
           chmod +x package-kit.sh
           ./package-kit.sh
 
-      - name: Extract release notes from WHATS-NEW.md
+      - name: Build release notes (quick start + new changes)
         run: |
           VER="$(tr -d '[:space:]' < VERSION)"
+          # Lead with the static quick-start, then a separator.
+          cp .github/RELEASE_QUICKSTART.md RELEASE_NOTES.md
+          printf '\n---\n\n' >> RELEASE_NOTES.md
+          # Append the matching WHATS-NEW.md section as "New changes".
           awk -v ver="(v${VER})" '
             index($0, "## ") == 1 && index($0, ver) > 0 { p = 1; print; next }
             index($0, "## ") == 1 && p { exit }
             p { print }
-          ' WHATS-NEW.md > RELEASE_NOTES.md
-          if [ ! -s RELEASE_NOTES.md ]; then
+          ' WHATS-NEW.md > whatsnew_section.md
+          if [ -s whatsnew_section.md ]; then
+            cat whatsnew_section.md >> RELEASE_NOTES.md
+          else
             echo "No WHATS-NEW.md section for v${VER} — using a placeholder." >&2
-            echo "Release v${VER}. See WHATS-NEW.md for details." > RELEASE_NOTES.md
+            echo "## New changes (v${VER})" >> RELEASE_NOTES.md
+            echo "See WHATS-NEW.md for details." >> RELEASE_NOTES.md
           fi
           echo "----- release notes -----"; cat RELEASE_NOTES.md
 
