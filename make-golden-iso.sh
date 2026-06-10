@@ -3,7 +3,7 @@
 # make-golden-iso.sh — guided, end-to-end build of a golden Veeam appliance ISO
 # =============================================================================
 # Interactive "easy button" that runs the whole prepare + build flow:
-#   - select role: proxy | hardened-repo (VIA ISO) | vsa (VSA ISO)
+#   - select role: proxy | vmware-proxy | hardened-repo (VIA ISO) | vsa | vbem (VSA ISO)
 #   - prompt for the veeamadmin password (hidden, confirmed, validated)
 #   - choose whether veeamadmin MFA is enforced (auto-forced ON for hardened-repo)
 #   - choose whether the veeamso (Security Officer) account is enabled
@@ -52,15 +52,19 @@ echo "============================================================"
 echo
 echo "Select appliance role:"
 echo "   [1] proxy          — VIA: generic backup proxy"
-echo "   [2] hardened-repo  — VIA: Veeam Hardened Repository (forces MFA on BOTH accounts)"
-echo "   [3] vsa            — VSA: Veeam Backup & Replication server"
+echo "   [2] vmware-proxy   — VIA: VMware proxy with iSCSI & NVMe/TCP storage connectivity"
+echo "   [3] hardened-repo  — VIA: Veeam Hardened Repository (forces MFA on BOTH accounts)"
+echo "   [4] vsa            — VSA: Veeam Backup & Replication server"
+echo "   [5] vbem           — VSA: Veeam Backup Enterprise Manager"
 while true; do
-  read -rp "  Role [1/2/3]: " r || die "input ended"
+  read -rp "  Role [1/2/3/4/5]: " r || die "input ended"
   case "$r" in
     1|proxy)             ROLE=proxy;         ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vprx; break ;;
-    2|hardened-repo|hr)  ROLE=hardened-repo; ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vlhr; break ;;
-    3|vsa)               ROLE=vsa;           ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbr;  break ;;
-    *) echo "  ✗ enter 1, 2, or 3" >&2 ;;
+    2|vmware-proxy|vmw)  ROLE=vmware-proxy;  ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vinf; break ;;
+    3|hardened-repo|hr)  ROLE=hardened-repo; ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vlhr; break ;;
+    4|vsa)               ROLE=vsa;           ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbr;  break ;;
+    5|vbem|em)           ROLE=vbem;          ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbem; break ;;
+    *) echo "  ✗ enter 1, 2, 3, 4, or 5" >&2 ;;
   esac
 done
 KSNAME=unattended-block.tmpl

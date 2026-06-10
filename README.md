@@ -15,15 +15,20 @@ appliances. You pick the **role** at build time (which stock kickstart is pulled
 from the ISO):
 - **proxy** — VIA generic backup proxy ("Veeam Infrastructure Appliance",
   `VARIANT_ID=vbproxy`); uses the **VIA** ISO's `proxy-ks.cfg`.
+- **vmware-proxy** — VIA VMware backup proxy with **iSCSI & NVMe/TCP** storage
+  connectivity (the "Veeam Infrastructure Appliance (with iSCSI & NVMe/TCP)"
+  variant); uses the **VIA** ISO's `vmware-proxy-ks.cfg`.
 - **hardened-repo** — VIA Veeam Hardened Repository (`VARIANT_ID=veeam-lhr`); uses
   the **VIA** ISO's `hardened-repo-ks.cfg`. **Forces MFA on BOTH veeamadmin and veeamso.**
 - **vsa** — Veeam Backup & Replication server ("Veeam Software Appliance",
   `VARIANT_ID=vbr`); uses the **VSA** ISO's `vbr-ks.cfg`.
+- **vbem** — Veeam Backup Enterprise Manager; uses the **VSA** ISO's `vbem-ks.cfg`.
 
 `make-golden-iso.sh` prompts for the role; the standalone scripts take
-`--role proxy|hardened-repo|vsa`. Each role uses its matching **source ISO** (the
-Veeam Infrastructure Appliance ISO for proxy/hardened-repo, the Veeam Software
-Appliance ISO for vsa). Two further options apply to any role: you can **supply
+`--role proxy|vmware-proxy|hardened-repo|vsa|vbem`. Each role uses its matching
+**source ISO** (the Veeam Infrastructure Appliance ISO for
+proxy/vmware-proxy/hardened-repo, the Veeam Software Appliance ISO for vsa/vbem).
+Two further options apply to any role: you can **supply
 your own MFA keys / SO recovery token** (instead of auto-generating), and you can
 **enable or disable the veeamso account** (`veeamso.isEnabled`).
 
@@ -100,8 +105,8 @@ on Linux/`xorriso` — this is just an orchestrator, not a Windows reimplementat
 host's login user must be **root or able to `sudo`** (the build loop-mounts the UEFI image).
 
 ## Configuration model
-- **Role:** chosen at build time — `proxy` or `hardened-repo` (see top of this doc).
-- **Role:** `proxy` | `hardened-repo` | `vsa`, chosen at build time (see top).
+- **Role:** `proxy` | `vmware-proxy` | `hardened-repo` | `vsa` | `vbem`, chosen at
+  build time (see top of this doc).
 - **Secret keys (MFA + SO recovery token):** generated per deployment by default,
   via `generate-secrets.sh` (or `make-golden-iso.sh`) — the kit ships placeholders,
   not preset keys. **Or supply your own:** `make-golden-iso.sh` offers it
@@ -130,7 +135,7 @@ Everything below ships in the kit — this is the complete contents of the custo
 | File | Purpose |
 |------|---------|
 | [make-golden-iso.sh](make-golden-iso.sh) | **Guided one-shot (start here):** prompts for role, credentials, veeamadmin-MFA + veeamso-enable choices, supply-your-own-keys, hostname prefix, NTP (and skip-NTP-sync), and an optional custom `%post`; fills the unattended block and builds the ISO. Run on Linux. |
-| [build-appliance-iso.sh](build-appliance-iso.sh) | Standalone build: extracts the role's stock kickstart from the source ISO, inserts the unattended block, and repacks the golden ISO (`--role proxy\|hardened-repo\|vsa`). Run on Linux. Derives + patches grub.cfg from the same ISO. |
+| [build-appliance-iso.sh](build-appliance-iso.sh) | Standalone build: extracts the role's stock kickstart from the source ISO, inserts the unattended block, and repacks the golden ISO (`--role proxy\|vmware-proxy\|hardened-repo\|vsa\|vbem`). Run on Linux. Derives + patches grub.cfg from the same ISO. |
 | [generate-secrets.sh](generate-secrets.sh) | Standalone: writes MFA keys + SO recovery token into `unattended-block.tmpl` (`./generate-secrets.sh`); supply-your-own via env vars. |
 | [check-credentials.sh](check-credentials.sh) | Read-only verifier: checks the veeamadmin/veeamso passwords + keys against the appliance policy (DISA STIG-aligned). Run it on `unattended-block.tmpl` before building, or on a mounted built ISO's derived `…-ks.cfg` to diagnose a "dropped to manual config" boot. |
 | [make-golden-remote.ps1](make-golden-remote.ps1) | **Windows helper:** from a Windows box, uploads the kit + your ISO to a Linux build host over SSH, runs the build there interactively, and pulls the finished ISO back. (The build still runs on Linux — see "Building on Windows via a remote Linux host".) |
@@ -194,7 +199,7 @@ it. **Steps 1–4 run on a Linux box** (or WSL2 / a Linux container) — see the
 > one machine, build on Linux later). On a **Windows** box with a separate Linux build host,
 > **`make-golden-remote.ps1`** drives this whole flow remotely (see "Building on Windows via a
 > remote Linux host"). The numbered steps below document exactly what the guided script does —
-> follow them manually (with `--role proxy|hardened-repo|vsa` on the standalone scripts) if you
+> follow them manually (with `--role proxy|vmware-proxy|hardened-repo|vsa|vbem` on the standalone scripts) if you
 > prefer granular control or an automated pipeline.
 
 > You fill **one** file for every role — `unattended-block.tmpl`. The build pulls
@@ -295,15 +300,19 @@ install-time `%post` steps (see "Custom %post") — `make-golden-iso.sh` prompts
 - The installer runs unattended, then **auto-reboots and ejects** the media. On
   first boot, `veeam-init.service` applies the credentials and deletes the
   plaintext answer file. Each VM gets a unique auto hostname (`vprx-<hash>` for
-  proxy, `vlhr-<hash>` for hardened repo, `vbr-<hash>` for vsa).
+  proxy, `vinf-<hash>` for vmware-proxy, `vlhr-<hash>` for hardened repo,
+  `vbr-<hash>` for vsa, `vbem-<hash>` for vbem).
 
 ### 6. Bring each appliance into service
-- **proxy / hardened-repo (VIA):** these don't run VBR themselves — add each one to
-  your VBR server as a **backup proxy** (NBD/HotAdd) or a **hardened repository**
-  (console, or scripted via PowerShell/REST).
+- **proxy / vmware-proxy / hardened-repo (VIA):** these don't run VBR themselves —
+  add each one to your VBR server as a **backup proxy** (NBD/HotAdd; vmware-proxy
+  also brings iSCSI & NVMe/TCP storage connectivity for Direct SAN / storage
+  access) or a **hardened repository** (console, or scripted via PowerShell/REST).
 - **vsa:** the appliance **is** the Veeam Backup & Replication server — nothing to
   register it *into*; log in and configure it (or attach it to Enterprise
   Manager / VSPC if you use them).
+- **vbem:** the appliance **is** the Veeam Backup Enterprise Manager server — log
+  in and connect it to your VBR server(s).
 
 ### 7. Verify on a sample appliance
 ```bash

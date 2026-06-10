@@ -7,10 +7,13 @@ This kit builds an **unattended** Veeam appliance ISO that pre-defines the
 `veeamadmin` and `veeamso` logins so many identical appliances can be deployed from
 one golden ISO. You pick the **role** at build time:
 - **proxy** — VIA generic backup proxy (NBD/HotAdd)
+- **vmware-proxy** — VIA VMware proxy with iSCSI & NVMe/TCP storage connectivity
 - **hardened-repo** — VIA Veeam Hardened Repository
 - **vsa** — Veeam Backup & Replication server (Veeam Software Appliance)
+- **vbem** — Veeam Backup Enterprise Manager (Veeam Software Appliance)
 
-proxy/hardened-repo build from the **VIA** ISO; vsa builds from the **VSA** ISO.
+proxy/vmware-proxy/hardened-repo build from the **VIA** ISO; vsa/vbem build from
+the **VSA** ISO.
 
 This page is the 60-second quickstart. Deeper detail is in **README.md**; the
 credentials/keys reference is in **CREDENTIALS.md**.
@@ -37,7 +40,7 @@ chmod +x *.sh          # if the execute bit didn't survive transfer
 ./make-golden-iso.sh   # auto-detects the matching ISO in this folder for the chosen role
 ```
 
-It prompts for the **role** (proxy / hardened-repo / vsa), a **hostname prefix**
+It prompts for the **role** (proxy / vmware-proxy / hardened-repo / vsa / vbem), a **hostname prefix**
 (each VM becomes `<prefix>-<unique-hash>`; default per role), the **veeamadmin**
 password, whether to **enforce veeamadmin MFA** (auto-forced for hardened-repo),
 whether to **enable the veeamso account**, the **veeamso** password (when enabled;

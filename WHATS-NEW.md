@@ -3,6 +3,13 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-10 (v1.2.0)
+- Added two new build **roles**, so the kit now covers all five Veeam appliance kickstarts:
+  - **`vmware-proxy`** — VIA VMware backup proxy with **iSCSI & NVMe/TCP** storage connectivity (the "Veeam Infrastructure Appliance (with iSCSI & NVMe/TCP)" variant; builds from the **VIA** ISO's `vmware-proxy-ks.cfg`).
+  - **`vbem`** — **Veeam Backup Enterprise Manager** (builds from the **VSA** ISO's `vbem-ks.cfg`).
+- The guided builder now lists all five roles (proxy / vmware-proxy / hardened-repo / vsa / vbem), and the standalone `build-appliance-iso.sh` accepts `--role vmware-proxy` and `--role vbem`. Same version-agnostic flow: the stock kickstart and grub are extracted from your ISO at build time.
+- Fixed the grub default-entry text per role: Enterprise Manager's install entry omits the "(including local backups)" suffix the other roles use, so its unattended default boot now points at the correct menu entry.
+
 ## New changes — 2026-06-08 (v1.1.2)
 - Added a **custom %post hook** (`--custom-post`, and a prompt in the guided builder) so you can inject your own install-time steps — **firewall rules**, an agent, an SSH key, CMDB registration, etc. Includes a starter template, `example-custom-post-firewall.sh`. (Additive and unsupported/at-your-own-risk; not for network/domain/password-policy/encryption, which the appliance owns.)
 - Made the **Windows remote-build helper** (`make-golden-remote.ps1`) far more robust: it no longer deletes the remote build on a transfer failure (so a mistyped SSH password can't throw away a finished ISO — you can just retry the download), retries network steps, and recommends SSH key auth to avoid repeated password prompts.

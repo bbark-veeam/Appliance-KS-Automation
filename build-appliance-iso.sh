@@ -4,13 +4,16 @@
 #                          golden Veeam appliance ISO
 # =============================================================================
 # Produces ONE golden ISO for large-scale deployment (shared creds across all
-# appliances provisioned from it). Supports three roles:
+# appliances provisioned from it). Supports five roles:
 #   --role proxy           -> generic backup proxy        (VIA ISO, proxy-ks.cfg)
+#   --role vmware-proxy    -> VMware proxy, iSCSI/NVMe-TCP (VIA ISO, vmware-proxy-ks.cfg)
 #   --role hardened-repo   -> Veeam Hardened Repository    (VIA ISO, hardened-repo-ks.cfg)
 #   --role vsa             -> Veeam Backup & Replication   (VSA ISO, vbr-ks.cfg)
+#   --role vbem            -> Enterprise Manager           (VSA ISO, vbem-ks.cfg)
 #
 # Pass the matching SOURCE ISO: the Veeam Infrastructure Appliance ISO for
-# proxy/hardened-repo, or the Veeam Software Appliance ISO for vsa.
+# proxy/vmware-proxy/hardened-repo, or the Veeam Software Appliance ISO for
+# vsa/vbem.
 #
 # VERSION-AGNOSTIC BY DESIGN. Nothing build-specific is shipped. At build time
 # this script, for the chosen role:
@@ -80,11 +83,22 @@ SRC_ISO="${ARGS[0]:-}"
 OUT_ISO="${ARGS[1]:-}"
 
 # ---- role-specific settings -------------------------------------------------
+# INSTALL_ENTRY is the grub "fresh install" menu-entry text. It is identical for
+# every role EXCEPT vbem, whose entry omits the "(including local backups)" suffix
+# (Enterprise Manager keeps no local backups). The grub default is built as
+# "<submenu>><entry>", so a wrong entry string points the default at a missing
+# menu node — hence it is tracked per role.
+INSTALL_ENTRY="Install - fresh install, wipes everything (including local backups)"
 case "$ROLE" in
   proxy)
     STOCK_KS="proxy-ks.cfg"
     GRUB_SUBMENU="Veeam Infrastructure Appliance"
     ROLE_TAG="PROXY" ;;
+  vmware-proxy)
+    # VIA VMware backup proxy with iSCSI & NVMe/TCP storage connectivity.
+    STOCK_KS="vmware-proxy-ks.cfg"
+    GRUB_SUBMENU="Veeam Infrastructure Appliance (with iSCSI & NVMe/TCP)"
+    ROLE_TAG="VMWAREPROXY" ;;
   hardened-repo)
     STOCK_KS="hardened-repo-ks.cfg"
     GRUB_SUBMENU="Veeam Hardened Repository"
@@ -93,12 +107,18 @@ case "$ROLE" in
     STOCK_KS="vbr-ks.cfg"
     GRUB_SUBMENU="Veeam Backup & Replication"
     ROLE_TAG="VSA" ;;
-  *) die "unknown --role '$ROLE' (use: proxy | hardened-repo | vsa)" ;;
+  vbem)
+    # VSA Veeam Backup Enterprise Manager — distinct install-entry text (no suffix).
+    STOCK_KS="vbem-ks.cfg"
+    GRUB_SUBMENU="Veeam Backup Enterprise Manager"
+    INSTALL_ENTRY="Install - fresh install, wipes everything"
+    ROLE_TAG="VBEM" ;;
+  *) die "unknown --role '$ROLE' (use: proxy | vmware-proxy | hardened-repo | vsa | vbem)" ;;
 esac
 KS_ISO_PATH="/$STOCK_KS"          # path of the stock kickstart inside the ISO
-GRUB_DEFAULT="${GRUB_SUBMENU}>Install - fresh install, wipes everything (including local backups)"
+GRUB_DEFAULT="${GRUB_SUBMENU}>${INSTALL_ENTRY}"
 
-[[ -n "$SRC_ISO" ]] || die "usage: $0 [--role proxy|hardened-repo|vsa] [--hostname-prefix P] [--block FILE] [--custom-post FILE] [--emit-ks FILE] <source-iso> [output-iso]"
+[[ -n "$SRC_ISO" ]] || die "usage: $0 [--role proxy|vmware-proxy|hardened-repo|vsa|vbem] [--hostname-prefix P] [--block FILE] [--custom-post FILE] [--emit-ks FILE] <source-iso> [output-iso]"
 [[ -f "$SRC_ISO" ]] || die "source ISO not found: $SRC_ISO"
 [[ -f "$BLOCK_FILE" ]] || die "unattended block template not found: $BLOCK_FILE"
 [[ -z "$CUSTOM_POST" || -f "$CUSTOM_POST" ]] || die "custom %post file not found: $CUSTOM_POST"
