@@ -21,8 +21,12 @@
 #     and the isMfaEnabled / isEnabled flags.
 ###############################################################################
 
-log "Unattended: disable Veeam initialization wizard"
+log "Unattended: disable Veeam cockpit auto-test init"
 mkdir -p /etc/veeam
+# NOTE: this flag governs the Cockpit auto-test init only. It does NOT suppress the
+# first-boot console setup TUI on tty1 (that is a getty autologin — ordered after
+# veeam-init at the END of this block). Kept here because it is harmless and still
+# relevant on cockpit-bearing roles.
 touch /etc/veeam/cockpit_auto_test_disable_init
 
 log "Unattended: write first-boot answer file /etc/veeam/vbr_init.cfg"
@@ -73,4 +77,27 @@ RemainAfterExit=no
 WantedBy=multi-user.target
 VEEAM_INIT_SERVICE_EOF
 systemctl enable veeam-init.service
+
+log "Unattended: order the console setup TUI (tty1) after veeam-init"
+# The first-boot 'setup wizard' is getty@tty1.service with a stock drop-in
+# (.../getty@tty1.service.d/override.conf) that autologins the 'veeamtui' user
+# (Description=Veeam TUI). On slow boots that autologin can appear BEFORE veeam-init
+# finishes applying vbr_init.cfg, so an operator sees the manual wizard mid-config and
+# thinks the unattended deploy "fell to manual". (The cockpit flag above does NOT cover
+# this — it's an agetty autologin, not Cockpit.) Add an ADDITIVE drop-in that orders the
+# TUI after veeam-init. This file is separate from the stock override.conf and only adds
+# a [Unit] directive, so the autologin ExecStart is left untouched.
+#   - After= ONLY, never Wants=: veeam-init disables itself after applying (systemctl
+#     disable veeam-init above), so a Wants= would re-pull/re-run it on every later boot.
+#     After= orders it on first boot (when it's still enabled) and is a no-op afterward.
+#   - No console lockout: After= is satisfied when veeam-init FINISHES (success OR
+#     failure), and via its oneshot start-timeout if it ever hangs, so tty1 always comes
+#     up eventually; a genuine apply failure still surfaces the TUI for manual config.
+#   - tty1 only (matches where the stock TUI lives). If a deployment uses a serial
+#     console, mirror this under serial-getty@<port>.service.d/.
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat << 'VEEAM_TTY_ORDER_EOF' >> /etc/systemd/system/getty@tty1.service.d/10-wait-veeam-init.conf
+[Unit]
+After=veeam-init.service
+VEEAM_TTY_ORDER_EOF
 
