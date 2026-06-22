@@ -3,6 +3,13 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-22 (v1.3.0)
+- Added **build logging** so every run leaves a record to diagnose a failed build (or a later install) from:
+  - The guided builder writes a **job log** of the run, and the build step writes its own **agent log**; the two share a run id and are grouped in one per-run folder under `logs/`. `generate-secrets.sh` and `check-credentials.sh` also log when run on their own.
+  - **Always on** — use `--no-log` to disable or `--log <file>` to set the path. The per-run folder is named by role + timestamp (e.g. `proxy-2026-06-22T19-03-10Z-…`) so the run you want is easy to find.
+  - The format mirrors the familiar Veeam **job/agent** log style, with headers that clearly mark this as a community tool (not an official Veeam product). **No secrets are ever written to a log** — passwords appear as a fixed mask, and generated MFA keys / the recovery token are never logged (they stay on the console and in the existing secrets file only).
+  - The Windows remote helper (`make-golden-remote.ps1`) writes its own transport log and pulls the Linux build logs back alongside the ISO.
+
 ## New changes — 2026-06-10 (v1.2.0)
 - Added two new build **roles**, so the kit now covers all five Veeam appliance kickstarts:
   - **`vmware-proxy`** — VIA VMware backup proxy with **iSCSI & NVMe/TCP** storage connectivity (the "Veeam Infrastructure Appliance (with iSCSI & NVMe/TCP)" variant; builds from the **VIA** ISO's `vmware-proxy-ks.cfg`).

@@ -13,6 +13,10 @@ baseline-stock/
 # Archived earlier-release snapshot — old versions live in git history/tags.
 v1.0.x/
 
+# Build logs (Veeam-format job/agent logs written per run by kslog.sh).
+# Local diagnostics only; may name the role/ISO. Never committed.
+logs/
+
 # ── Generated secrets ────────────────────────────────────────────────────
 # generate-secrets.sh fills <<GENERATE_...>> tokens IN PLACE and keeps a
 # timestamped backup. Never commit the backups or any filled-in copies.

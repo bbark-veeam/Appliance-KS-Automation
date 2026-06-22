@@ -32,7 +32,7 @@ fi
 # Customer-facing allowlist (NO internal/, baseline-stock/, builds/, secrets, *.bak).
 CUST="VERSION LICENSE DISCLAIMER.md WHATS-NEW.md README.md CREDENTIALS.md \
 unattended-block.tmpl \
-make-golden-iso.sh generate-secrets.sh build-appliance-iso.sh check-credentials.sh \
+make-golden-iso.sh generate-secrets.sh build-appliance-iso.sh check-credentials.sh kslog.sh \
 make-golden-remote.ps1 example-custom-post-firewall.sh example-custom-post-storage.sh \
 example-custom-post-license.sh"
 

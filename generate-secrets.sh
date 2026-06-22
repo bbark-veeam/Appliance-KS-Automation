@@ -29,13 +29,51 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KS="${1:-$HERE/unattended-block.tmpl}"
+KIT_VERSION="$(tr -d '[:space:]' < "$HERE/VERSION" 2>/dev/null || true)"; KIT_VERSION="${KIT_VERSION:-unknown}"
+
+# Veeam-style logging (worker/agent format). This script PRINTS the generated
+# secrets to the console for the operator to record, so its log is written
+# FILE-ONLY via arec() (NEVER tee'd) and only ever records masked metadata.
+if [ -f "$HERE/kslog.sh" ]; then . "$HERE/kslog.sh"
+else alog(){ :; }; kslog_runid(){ printf 'no-runid'; }; kslog_agent_banner(){ :; }; KSLOG_MASK='****************'; fi
+
+NO_LOG=""; LOG_OVERRIDE=""; LOG_FILE=""; KS=""; NEXT=""
+for a in "$@"; do
+  if [ -n "$NEXT" ]; then case "$NEXT" in logf) LOG_OVERRIDE="$a" ;; esac; NEXT=""; continue; fi
+  case "$a" in
+    --no-log) NO_LOG=1 ;;
+    --log)    NEXT=logf ;;
+    --log=*)  LOG_OVERRIDE="${a#*=}" ;;
+    *)        [ -z "$KS" ] && KS="$a" ;;
+  esac
+done
+KS="${KS:-$HERE/unattended-block.tmpl}"
+
+arec() { [ -n "$LOG_FILE" ] && alog "$@" >> "$LOG_FILE" || true; }   # file-only (never tee — secrets print to console)
+on_exit() {
+  local rc=$?
+  [ -z "$LOG_FILE" ] && return 0
+  if [ "$rc" -eq 0 ]; then arec result "SECRETS RESULT: SUCCESS"
+  else arec error "SECRETS RESULT: FAILURE (exit $rc)"; fi
+}
+trap on_exit EXIT
 
 command -v python3 >/dev/null || { echo "ERROR: python3 is required" >&2; exit 1; }
 [[ -f "$KS" ]] || { echo "ERROR: kickstart not found: $KS" >&2; exit 1; }
 
+if [ -z "$NO_LOG" ]; then
+  RUN_ID="$(kslog_runid secrets)"
+  LOG_DIR="${KSLOG_DIR:-$HERE/logs/$RUN_ID}"
+  mkdir -p "$LOG_DIR" || { echo "ERROR: could not create log dir: $LOG_DIR" >&2; exit 1; }
+  LOG_FILE="${LOG_OVERRIDE:-$LOG_DIR/Agent.generate-secrets.log}"
+  kslog_agent_banner "generate-secrets.sh" "$HERE/generate-secrets.sh" "$KIT_VERSION" "$RUN_ID" >> "$LOG_FILE"
+  echo "  -> log: $LOG_FILE"
+  arec init "block file: $KS"
+fi
+
 BACKUP="$KS.bak.$(date +%Y%m%d%H%M%S)"
 cp -p "$KS" "$BACKUP"
+arec init "backup of previous block: $BACKUP"
 
 KS="$KS" python3 - <<'PY'
 import os, re, secrets, base64, uuid
@@ -76,6 +114,12 @@ print(f"  veeamadmin.mfaSecretKey = {admin_mfa}    (enroll in an authenticator i
 print(f"  veeamso.mfaSecretKey    = {so_mfa}    (veeamso enrolls this in an authenticator app)")
 print(f"  veeamso.recoveryToken   = {token}    (STORE SECURELY — cannot be recovered later)")
 PY
+
+# Masked metadata only — the actual values are printed to the console above, never logged.
+arec keygen "veeamadmin.mfaSecretKey: $([ -n "${VEEAMADMIN_MFA:-}" ] && echo supplied || echo generated) = $KSLOG_MASK"
+arec keygen "veeamso.mfaSecretKey: $([ -n "${VEEAMSO_MFA:-}" ] && echo supplied || echo generated) = $KSLOG_MASK"
+arec keygen "veeamso.recoveryToken: $([ -n "${VEEAMSO_TOKEN:-}" ] && echo supplied || echo generated) = $KSLOG_MASK"
+arec keygen "secrets written to $KS (values shown on console for recording; NOT logged)"
 
 echo
 echo "Backup of previous version: $BACKUP"

@@ -69,11 +69,35 @@ if (-not (Test-Path -LiteralPath $IsoPath)) { throw "Source ISO not found: $IsoP
 $iso = Get-Item -LiteralPath $IsoPath
 $kit = $PSScriptRoot
 $needed = @('make-golden-iso.sh', 'build-appliance-iso.sh', 'generate-secrets.sh',
-            'check-credentials.sh', 'unattended-block.tmpl', 'VERSION')
+            'check-credentials.sh', 'kslog.sh', 'unattended-block.tmpl', 'VERSION')
 foreach ($f in $needed) {
     if (-not (Test-Path (Join-Path $kit $f))) { throw "Kit file missing next to this script: $f (run this from the kit folder)" }
 }
 if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir | Out-Null }
+
+# ---- transport log (Veeam job-style; this .ps1 is the Windows orchestrator) --
+# Thin, FILE-ONLY record of THIS script's push/build/pull/cleanup actions (the
+# friendly console output is unchanged). It NEVER handles secrets — the build is
+# interactive on Linux — so it cannot leak any. The authoritative job + agent
+# logs are produced on Linux and pulled back after the build.
+$TLog = Join-Path $OutputDir ("Job.make-golden-remote-{0}.log" -f (Get-Date -Format "yyyy-MM-ddTHH-mm-ssZ"))
+function Write-TLog {
+    param([string]$Level = 'Info', [Parameter(Mandatory)][string]$Msg)
+    $line = "[{0}]    <{1}>    {2,-7}    {3}" -f (Get-Date -Format "dd.MM.yyyy HH:mm:ss.fff"), $PID, $Level, $Msg
+    try { Add-Content -LiteralPath $TLog -Value $line } catch { }
+}
+try {
+    Set-Content -LiteralPath $TLog -Value @(
+        ""
+        "==================================================================="
+        "Starting new log"
+        "Tool: [Veeam Appliance Kickstart - COMMUNITY TOOL, NOT an official Veeam product]"
+        "Report issues: [https://github.com/bbark-veeam/Appliance-KS-Automation/issues]"
+        ("Module: [make-golden-remote.ps1] (Windows transport orchestrator). PID: [{0}], Host: [{1}]" -f $PID, $env:COMPUTERNAME)
+        ("CmdLineParams: [BuildHost={0}; IsoPath={1}; OutputDir={2}]" -f $BuildHost, $iso.Name, $OutputDir)
+        ""
+    )
+} catch { }
 
 $sshOpts = @()
 if ($IdentityFile) {
@@ -97,25 +121,30 @@ function Invoke-Net {
 
 # ---- create remote working dir ----------------------------------------------
 Write-Host "Connecting to $BuildHost ..."
+Write-TLog -Msg "Connecting to $BuildHost"
 $remote = (& ssh @sshOpts $BuildHost 'mktemp -d' | Select-Object -Last 1)
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($remote)) {
     throw "Could not open an SSH session / create a remote working dir on $BuildHost (check host, auth, connectivity)."
 }
 $remote = $remote.Trim()
 Write-Host "Remote work dir: $remote"
+Write-TLog -Msg "Remote work dir: $remote"
 
 $success = $false
 $built = $false
 try {
     # ---- upload kit + ISO ---------------------------------------------------
     Write-Host "Uploading kit files ..."
+    Write-TLog -Msg ("Uploading kit ({0} files, incl. kslog.sh)" -f $needed.Count)
     $kitPaths = $needed | ForEach-Object { Join-Path $kit $_ }
     if (-not (Invoke-Net -What 'Kit upload' -Action { & scp @sshOpts @kitPaths "${BuildHost}:${remote}/" })) {
         throw "Kit upload failed."
     }
 
     Write-Host ("Uploading ISO ({0:N2} GB) — large transfer, please wait ..." -f ($iso.Length / 1GB))
+    Write-TLog -Msg ("Uploading source ISO {0} ({1:N2} GB)" -f $iso.Name, ($iso.Length / 1GB))
     if (-not (Invoke-Net -What 'ISO upload' -Action { & scp @sshOpts $iso.FullName "${BuildHost}:${remote}/" })) {
+        Write-TLog -Level Error -Msg "ISO upload failed"
         throw "ISO upload failed."
     }
 
@@ -123,8 +152,10 @@ try {
     $isoName = $iso.Name
     $buildCmd = "cd '$remote' && chmod +x *.sh && sudo ./make-golden-iso.sh './$isoName'"
     Write-Host "`n=== Starting interactive build on $BuildHost — answer the prompts below ===`n"
+    Write-TLog -Msg "Invoking interactive build (credentials entered on Linux; not captured here)"
     & ssh -t @sshOpts $BuildHost $buildCmd
     if ($LASTEXITCODE -ne 0) {
+        Write-TLog -Level Error -Msg "Remote build failed (exit $LASTEXITCODE)"
         throw "Remote build failed (exit $LASTEXITCODE). The remote dir is kept for inspection (see below)."
     }
 
@@ -138,18 +169,30 @@ try {
     }
     $built = $true
     $isoOut = $isoOut.Trim()
+    Write-TLog -Msg "Built ISO: $isoOut"
 
     Write-Host "`nDownloading built ISO ..."
     if (-not (Invoke-Net -What 'ISO download' -Action { & scp @sshOpts "${BuildHost}:${remote}/${isoOut}" $OutputDir })) {
+        Write-TLog -Level Error -Msg "Built-ISO download failed"
         throw "Download of the built ISO failed."
     }
+    Write-TLog -Msg "Downloaded built ISO to $OutputDir"
     if (-not [string]::IsNullOrWhiteSpace($secOut)) {
         $secOut = $secOut.Trim()
         Invoke-Net -What 'secrets download' -Action { & scp @sshOpts "${BuildHost}:${remote}/${secOut}" $OutputDir } | Out-Null
+        Write-TLog -Msg "Downloaded secrets file: $secOut (SENSITIVE — contents not logged)"
     }
+
+    # Pull the Linux job + agent logs back (non-secret: job log is masked, agent log
+    # is secret-free). Best-effort, single attempt — never fail the run over logs.
+    Write-Host "Downloading build logs (job + agent) ..."
+    & scp -r @sshOpts "${BuildHost}:${remote}/logs" $OutputDir 2>$null
+    if ($LASTEXITCODE -eq 0) { Write-TLog -Msg "Downloaded build logs to $OutputDir\logs" }
+    else { Write-TLog -Level Warning -Msg "Build logs not pulled (none present or transfer failed)" }
 
     $success = $true
     $outResolved = (Resolve-Path $OutputDir).Path
+    Write-TLog -Msg "SUCCESS — saved to $outResolved (ISO: $isoOut)"
     Write-Host "`nDone. Saved to: $outResolved"
     Write-Host "  ISO     : $isoOut"
     if (-not [string]::IsNullOrWhiteSpace($secOut)) {
@@ -162,9 +205,11 @@ finally {
     if ($success -and -not $KeepRemote) {
         Write-Host "Cleaning up remote build host (removing the kit, ISOs, and secrets) ..."
         & ssh @sshOpts $BuildHost "sudo rm -rf '$remote'" 2>$null
+        Write-TLog -Msg "Cleaned up remote workdir $remote"
     }
     elseif ($KeepRemote) {
         Write-Warning "KeepRemote set: remote copies (with cleartext credentials) left at ${BuildHost}:$remote. Remove manually:  ssh $optStr $BuildHost 'sudo rm -rf $remote'"
+        Write-TLog -Level Warning -Msg "KeepRemote set: remote workdir kept ($remote) — holds cleartext credentials"
     }
     else {
         # Failure path — DO NOT delete; the built ISO may still be there. Let the user retry the pull.
@@ -176,5 +221,9 @@ finally {
         }
         Write-Host    "  When you're done, DELETE the remote copy (it holds cleartext credentials):"
         Write-Host    "    ssh $optStr $BuildHost 'sudo rm -rf $remote'"
+        Write-TLog -Level Error -Msg "Run did not complete — remote workdir kept ($remote)"
     }
+    if ($success) { Write-TLog -Msg "TRANSPORT RESULT: SUCCESS" }
+    else { Write-TLog -Level Error -Msg "TRANSPORT RESULT: FAILURE" }
+    Write-Host "Transport log: $TLog"
 }

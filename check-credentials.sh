@@ -25,9 +25,43 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KS="${1:-$HERE/unattended-block.tmpl}"
+KIT_VERSION="$(tr -d '[:space:]' < "$HERE/VERSION" 2>/dev/null || true)"; KIT_VERSION="${KIT_VERSION:-unknown}"
+
+# Veeam-style logging (worker/agent format). Output is the policy VERDICT only —
+# it reports password PROPERTIES, never the values — so the whole verdict is safe
+# to tee into the log.
+if [ -f "$HERE/kslog.sh" ]; then . "$HERE/kslog.sh"
+else alog(){ :; }; kslog_runid(){ printf 'no-runid'; }; kslog_agent_banner(){ :; }; KSLOG_MASK='****************'; fi
+
+NO_LOG=""; LOG_OVERRIDE=""; LOG_FILE=""; TEE_PID=""; KS=""; NEXT=""
+for a in "$@"; do
+  if [ -n "$NEXT" ]; then case "$NEXT" in logf) LOG_OVERRIDE="$a" ;; esac; NEXT=""; continue; fi
+  case "$a" in
+    --no-log) NO_LOG=1 ;;
+    --log)    NEXT=logf ;;
+    --log=*)  LOG_OVERRIDE="${a#*=}" ;;
+    *)        [ -z "$KS" ] && KS="$a" ;;
+  esac
+done
+KS="${KS:-$HERE/unattended-block.tmpl}"
+
 [ -f "$KS" ] || { echo "ERROR: file not found: $KS" >&2; exit 2; }
 command -v python3 >/dev/null || { echo "ERROR: python3 is required" >&2; exit 2; }
+
+# Flush tee on exit (python prints the RESULT verdict, captured via tee).
+on_exit() { if [ -n "${TEE_PID:-}" ]; then exec >&- 2>&- || true; wait "$TEE_PID" 2>/dev/null || true; fi; }
+trap on_exit EXIT
+
+if [ -z "$NO_LOG" ]; then
+  RUN_ID="$(kslog_runid check)"
+  LOG_DIR="${KSLOG_DIR:-$HERE/logs/$RUN_ID}"
+  mkdir -p "$LOG_DIR" || { echo "ERROR: could not create log dir: $LOG_DIR" >&2; exit 2; }
+  LOG_FILE="${LOG_OVERRIDE:-$LOG_DIR/Agent.check-credentials.log}"
+  kslog_agent_banner "check-credentials.sh" "$HERE/check-credentials.sh" "$KIT_VERSION" "$RUN_ID" >> "$LOG_FILE"
+  exec > >(tee -a "$LOG_FILE") 2>&1
+  TEE_PID=$!
+  alog init "Checking credentials in: $KS"
+fi
 
 KS="$KS" CRACKLIB="$(command -v cracklib-check || true)" python3 - <<'PY'
 import os, re, subprocess, sys

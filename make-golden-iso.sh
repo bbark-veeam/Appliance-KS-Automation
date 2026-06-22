@@ -27,19 +27,46 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="$HERE/build-appliance-iso.sh"
 KIT_VERSION="$(tr -d '[:space:]' < "$HERE/VERSION" 2>/dev/null || true)"; KIT_VERSION="${KIT_VERSION:-unknown}"
+CMDLINE="$*"
+
+# Veeam-style logging (this is the "job"/orchestrator, so it uses the job format).
+# No-op shims if the lib is missing so the script still runs.
+if [ -f "$HERE/kslog.sh" ]; then
+  # shellcheck source=kslog.sh
+  . "$HERE/kslog.sh"
+else
+  jlog(){ :; }; kslog_runid(){ printf 'no-runid'; }; kslog_job_header(){ :; }; KSLOG_MASK='****************'
+fi
 
 PREP_ONLY=0
+NO_LOG=""
+JOB_LOG=""; LOG_DIR=""; RUN_ID=""
 ARGS=()
 for a in "$@"; do
   case "$a" in
     --prep-only) PREP_ONLY=1 ;;
+    --no-log)    NO_LOG=1 ;;
     *) ARGS+=("$a") ;;
   esac
 done
 SRC_ISO="${ARGS[0]:-}"
 OUT_ISO="${ARGS[1]:-}"
 
-die() { echo "ERROR: $*" >&2; exit 1; }
+# jrec: append a job-format line to the job log FILE only. The interactive console
+# keeps its friendly output, and because we NEVER tee, the secrets summary printed
+# to the console below can't reach the log file.
+jrec() { [ -n "$JOB_LOG" ] && jlog "$@" >> "$JOB_LOG" || true; }
+
+die() { echo "ERROR: $*" >&2; jrec Error "$*"; exit 1; }
+
+# Job result line on exit (covers a failed build: set -e propagates its exit code).
+on_exit() {
+  local rc=$?
+  [ -z "$JOB_LOG" ] && return 0
+  if [ "$rc" -eq 0 ]; then jrec Info "JOB RESULT: SUCCESS"
+  else jrec Error "JOB RESULT: FAILURE (exit $rc) — if the build ran, see the agent log in $LOG_DIR/"; fi
+}
+trap on_exit EXIT
 
 command -v python3 >/dev/null || die "python3 is required"
 [[ $PREP_ONLY -eq 1 || -f "$BUILD" ]] || die "build-appliance-iso.sh not found next to this script"
@@ -71,6 +98,22 @@ KSNAME=unattended-block.tmpl
 KS="$HERE/$KSNAME"
 [[ -f "$KS" ]] || die "$KSNAME not found next to this script"
 echo "  -> role: $ROLE  (fills the unattended block; stock kickstart comes from the ISO)"
+
+# ---- job log (Veeam job format; always-on, --no-log to disable) -------------
+# File-only (no tee) so the secrets summary can't reach it. Export the run id +
+# log dir so the build agent writes its agent log into the SAME per-run folder.
+if [ -z "$NO_LOG" ]; then
+  RUN_ID="$(kslog_runid "$ROLE")"; export KSLOG_RUN_ID="$RUN_ID"
+  LOG_DIR="$HERE/logs/$RUN_ID"; export KSLOG_DIR="$LOG_DIR"
+  mkdir -p "$LOG_DIR" || die "could not create log dir: $LOG_DIR"
+  JOB_LOG="$LOG_DIR/Job.make-golden.$ROLE.log"
+  kslog_job_header "make-golden-iso.sh" "$KIT_VERSION" "$RUN_ID" "$CMDLINE" >> "$JOB_LOG"
+  echo "  -> job log: $JOB_LOG"
+fi
+jrec Info "Role: $ROLE"
+
+# Custom %post / --no-log pass-through to the build agent.
+NOLOGOPT=(); [ -n "$NO_LOG" ] && NOLOGOPT=(--no-log)
 
 # Confirm overwrite if the block was already filled (real tokens, not comments).
 if ! grep -qE '<<(SET|GENERATE)_[A-Z_]+>>' "$KS"; then
@@ -141,6 +184,7 @@ while true; do
   [[ "$HOSTPREFIX" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,48}[A-Za-z0-9])?$ ]] && break
   echo "  ✗ letters/digits/hyphens only, no leading/trailing hyphen, ≤50 chars" >&2
 done
+jrec Info "Hostname prefix: $HOSTPREFIX"
 
 # ---- 1. veeamadmin password + MFA choice ------------------------------------
 echo
@@ -153,6 +197,8 @@ else
   read -rp "  Enforce MFA on the veeamadmin account? [Y/N] (Default behavior is No) " m || die "input ended"
   [[ "$m" =~ ^[Yy]$ ]] && ADMIN_MFA_ENABLED=true || ADMIN_MFA_ENABLED=false
 fi
+jrec Info "veeamadmin.password = $KSLOG_MASK (set)"
+jrec Info "veeamadmin.isMfaEnabled: $ADMIN_MFA_ENABLED"
 
 # ---- 2. veeamso account: enabled? + password --------------------------------
 echo
@@ -169,6 +215,8 @@ else
   echo "  veeamso will be DISABLED (veeamso.isEnabled=false); skipping its password."
   SO_PW=""   # python fills a throwaway compliant value so the answer file stays valid
 fi
+jrec Info "veeamso.isEnabled: $SO_ENABLED"
+[ "$SO_ENABLED" = true ] && jrec Info "veeamso.password = $KSLOG_MASK (set)" || true
 
 # ---- 3. NTP -----------------------------------------------------------------
 echo
@@ -185,6 +233,8 @@ done
 # server above stays configured (chrony syncs once reachable).
 read -rp "  Skip the NTP time-sync at first boot (for AVS / NTP-unreachable networks)? [Y/N] (Default behavior is No) " ntpoff || die "input ended"
 if [[ "$ntpoff" =~ ^[Yy]$ ]]; then NTP_RUNSYNC=false; else NTP_RUNSYNC=true; fi
+jrec Info "ntp.servers: $NTP"
+jrec Info "ntp.runSync: $NTP_RUNSYNC"
 
 # ---- 4. secret keys: generate, or supply your own ---------------------------
 echo
@@ -197,6 +247,7 @@ if [[ "$own" =~ ^[Yy]$ ]]; then
     prompt_optional "veeamso recovery token — GUID (8-4-4-4-12 hex)" is_guid TOKEN
   fi
 fi
+jrec Info "supply-own-keys: $([[ "$own" =~ ^[Yy]$ ]] && echo yes || echo no)"
 
 # ---- 4b. optional custom %post (firewall rules, agents, etc.) ----------------
 echo
@@ -212,6 +263,7 @@ while true; do
   echo "  ✗ file not found: $CUSTOM_POST — try again, or blank for none" >&2
 done
 CPOPT=(); [ -n "$CUSTOM_POST" ] && CPOPT=(--custom-post "$CUSTOM_POST")
+jrec Info "custom %post: ${CUSTOM_POST:-none}"
 
 # ---- 4c. guard: VBR-API call in custom %post while veeamadmin MFA is enabled --
 # Best-effort detection of a VBR REST/cmdlet call in the snippet. Unattended API
@@ -345,8 +397,11 @@ SECRETS_FILE="$HERE/veeam-${ROLE}-secrets-$(date +%Y%m%d%H%M%S).txt"
   echo "============================================================"
 } > "$SECRETS_FILE"
 chmod 600 "$SECRETS_FILE"
+jrec Info "secrets generated and written to $KSNAME (values NOT logged)"
+jrec Info "secrets file: $SECRETS_FILE (SENSITIVE — not logged here)"
 
 if [ $PREP_ONLY -eq 1 ]; then
+  jrec Info "prep-only: build skipped"
   echo
   echo "$KSNAME is prepared (--prep-only set; build skipped)."
   echo "Build later on Linux:  ./build-appliance-iso.sh --role $ROLE --hostname-prefix $HOSTPREFIX ${CUSTOM_POST:+--custom-post $CUSTOM_POST }<source-iso>"
@@ -358,8 +413,9 @@ fi
 
 echo
 echo "Building the golden ISO (role: $ROLE)..."
+jrec Info "Invoking build agent: $BUILD${LOG_DIR:+ (agent log -> $LOG_DIR/Agent.build-appliance.$ROLE.log)}"
 if [ -n "$SRC_ISO" ]; then
-  "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "$SRC_ISO" ${OUT_ISO:+"$OUT_ISO"}
+  "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO" ${OUT_ISO:+"$OUT_ISO"}
 else
   # Auto-detect the matching source ISO (role-specific) in this folder or ../ISO Archive.
   shopt -s nullglob
@@ -367,14 +423,14 @@ else
   shopt -u nullglob
   if [ ${#isos[@]} -eq 1 ]; then
     echo "Using detected source ISO: ${isos[0]}"
-    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${isos[0]}"
+    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "${isos[0]}"
   elif [ ${#isos[@]} -gt 1 ]; then
     echo "  Multiple matching ISOs detected:"; printf '    %s\n' "${isos[@]}"
     read -rp "  Path to source ISO: " SRC_ISO || die "input ended"
-    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "$SRC_ISO"
+    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO"
   else
     read -rp "  Path to source ISO ($ISO_GLOB): " SRC_ISO || die "input ended"
-    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "$SRC_ISO"
+    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO"
   fi
 fi
 

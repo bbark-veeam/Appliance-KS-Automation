@@ -44,7 +44,21 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_VERSION="$(tr -d '[:space:]' < "$HERE/VERSION" 2>/dev/null || true)"; KIT_VERSION="${KIT_VERSION:-unknown}"
 
-die() { echo "ERROR: $*" >&2; exit 1; }
+# Veeam-style logging helpers (this is a "worker", so it uses the agent format).
+# If the lib is missing, fall back to no-op shims so the build still runs.
+if [ -f "$HERE/kslog.sh" ]; then
+  # shellcheck source=kslog.sh
+  . "$HERE/kslog.sh"
+else
+  alog(){ :; }; kslog_runid(){ printf 'no-runid'; }; kslog_scrub(){ cat; }
+  kslog_agent_banner(){ :; }; KSLOG_MASK='****************'
+fi
+
+# Logging + cleanup state (kept trap-safe; real values set further down).
+NO_LOG=""; LOG_OVERRIDE=""; LOG_FILE=""; TEE_PID=""; RUN_ID=""
+WORK=""; EBMNT=""; SUDO=""
+
+die() { alog error "$*" >&2; exit 1; }
 
 # ---- arguments --------------------------------------------------------------
 ROLE="proxy"
@@ -62,6 +76,7 @@ for a in "$@"; do
       prefix) HOST_PREFIX="$a" ;;
       emit)   EMIT_KS="$a" ;;
       cpost)  CUSTOM_POST="$a" ;;
+      logf)   LOG_OVERRIDE="$a" ;;
     esac
     NEXT=""; continue
   fi
@@ -76,6 +91,9 @@ for a in "$@"; do
     --emit-ks=*)         EMIT_KS="${a#*=}" ;;
     --custom-post)       NEXT=cpost ;;
     --custom-post=*)     CUSTOM_POST="${a#*=}" ;;
+    --no-log)            NO_LOG=1 ;;
+    --log)               NEXT=logf ;;
+    --log=*)             LOG_OVERRIDE="${a#*=}" ;;
     *) ARGS+=("$a") ;;
   esac
 done
@@ -118,7 +136,7 @@ esac
 KS_ISO_PATH="/$STOCK_KS"          # path of the stock kickstart inside the ISO
 GRUB_DEFAULT="${GRUB_SUBMENU}>${INSTALL_ENTRY}"
 
-[[ -n "$SRC_ISO" ]] || die "usage: $0 [--role proxy|vmware-proxy|hardened-repo|vsa|vbem] [--hostname-prefix P] [--block FILE] [--custom-post FILE] [--emit-ks FILE] <source-iso> [output-iso]"
+[[ -n "$SRC_ISO" ]] || die "usage: $0 [--role proxy|vmware-proxy|hardened-repo|vsa|vbem] [--hostname-prefix P] [--block FILE] [--custom-post FILE] [--emit-ks FILE] [--log FILE|--no-log] <source-iso> [output-iso]"
 [[ -f "$SRC_ISO" ]] || die "source ISO not found: $SRC_ISO"
 [[ -f "$BLOCK_FILE" ]] || die "unattended block template not found: $BLOCK_FILE"
 [[ -z "$CUSTOM_POST" || -f "$CUSTOM_POST" ]] || die "custom %post file not found: $CUSTOM_POST"
@@ -126,6 +144,39 @@ GRUB_DEFAULT="${GRUB_SUBMENU}>${INSTALL_ENTRY}"
 # Output name derives from the SOURCE ISO (so it carries the actual build/version,
 # whatever it is) + the role tag — version-agnostic and accurate.
 OUT_ISO="${OUT_ISO:-$HERE/$(basename "$SRC_ISO" .iso)_${ROLE_TAG}_UNATTENDED.iso}"
+
+# ---- build log (Veeam agent format; always-on, --no-log to disable) ---------
+# This worker prints NO secrets — passwords/keys/token live only in the block file
+# and (in make-golden) the secrets summary, neither of which this script echoes —
+# so capturing all of its output here is safe. When invoked by make-golden, it
+# reuses the orchestrator's run id + log dir (KSLOG_RUN_ID / KSLOG_DIR) so the job
+# and agent logs land together; standalone, it makes its own.
+on_exit() {
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then alog result "BUILD RESULT: SUCCESS"
+  else                     alog error  "BUILD RESULT: FAILURE (exit $rc)"; fi
+  if [ -n "${EBMNT:-}" ] && mountpoint -q "$EBMNT" 2>/dev/null; then ${SUDO:-} umount "$EBMNT" || true; fi
+  [ -n "${WORK:-}" ] && rm -rf "$WORK"
+  if [ -n "${TEE_PID:-}" ]; then exec >&- 2>&- || true; wait "$TEE_PID" 2>/dev/null || true; fi
+}
+trap on_exit EXIT
+
+if [ -z "$NO_LOG" ]; then
+  RUN_ID="$(kslog_runid "$ROLE")"
+  LOG_DIR="${KSLOG_DIR:-$HERE/logs/$RUN_ID}"
+  mkdir -p "$LOG_DIR" || die "could not create log dir: $LOG_DIR"
+  LOG_FILE="${LOG_OVERRIDE:-$LOG_DIR/Agent.build-appliance.$ROLE.log}"
+  kslog_agent_banner "build-appliance-iso.sh" "$HERE/build-appliance-iso.sh" "$KIT_VERSION" "$RUN_ID" >> "$LOG_FILE"
+  exec > >(tee -a "$LOG_FILE") 2>&1   # mirror console + file (worker output is secret-free)
+  TEE_PID=$!
+  alog init "Build log: $LOG_FILE"
+fi
+alog init "Role: $ROLE"
+alog init "Source ISO: $SRC_ISO"
+alog init "Output ISO: $OUT_ISO"
+alog init "Hostname prefix: ${HOST_PREFIX:-<keep stock>}"
+[ -n "$CUSTOM_POST" ] && alog init "Custom %post: $CUSTOM_POST (UNSUPPORTED, inserted verbatim)"
+
 command -v xorriso >/dev/null || die "xorriso not installed (dnf/apt install xorriso)"
 command -v python3 >/dev/null || die "python3 not installed"
 if ! { [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null || command -v mcopy >/dev/null; }; then
@@ -185,27 +236,17 @@ PY
 # only WARNS; the guided make-golden-iso.sh prompts (default: stop) for this case.
 if [ -n "$CUSTOM_POST" ] && grep -qE '^veeamadmin\.isMfaEnabled=true' "$BLOCK_FILE" \
    && grep -qiE '(/api/v1/|oauth2/token|:9419|Install-VBRLicense|Connect-VBRServer)' "$CUSTOM_POST"; then
-  echo "WARNING: --custom-post looks like it calls the VBR API/cmdlets, but veeamadmin MFA" >&2
-  echo "         is ENABLED in the block — unattended API auth will hit an MFA challenge and" >&2
-  echo "         likely fail at first boot. Deploy with veeamadmin MFA disabled (enable it" >&2
-  echo "         after), or have the snippet compute the TOTP from the baked-in secret." >&2
+  alog warn "--custom-post looks like it calls the VBR API/cmdlets, but veeamadmin MFA is ENABLED in the block —"
+  alog warn "unattended API auth will hit an MFA challenge and likely fail at first boot. Deploy with veeamadmin"
+  alog warn "MFA disabled (enable it after), or have the snippet compute the TOTP from the baked-in secret."
 fi
-
-echo "Kit version    : $KIT_VERSION"
-echo "Role           : $ROLE"
-echo "Source ISO     : $SRC_ISO"
-echo "Output ISO     : $OUT_ISO"
-echo "Hostname prefix: ${HOST_PREFIX:-<keep stock>}"
-[ -n "$CUSTOM_POST" ] && echo "Custom %post   : $CUSTOM_POST  (UNSUPPORTED, inserted verbatim)"
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 WORK="$(mktemp -d)"
-EBMNT=""
-cleanup() { if [ -n "$EBMNT" ] && mountpoint -q "$EBMNT" 2>/dev/null; then $SUDO umount "$EBMNT"; fi; rm -rf "$WORK"; }
-trap cleanup EXIT
+# (cleanup + the SUCCESS/FAILURE result line are handled by on_exit, trapped above)
 
 # ---- derive the kickstart FROM the source ISO -------------------------------
-echo "Extracting stock kickstart $KS_ISO_PATH from the ISO and inserting the unattended block"
+alog extract "Extracting stock kickstart $KS_ISO_PATH from the ISO and inserting the unattended block"
 xorriso -osirrox on -indev "$SRC_ISO" -extract "$KS_ISO_PATH" "$WORK/stock-ks.cfg" >/dev/null 2>&1 \
   || die "could not extract $KS_ISO_PATH from the ISO (is this the right ISO for role '$ROLE'?)"
 [ -s "$WORK/stock-ks.cfg" ] || die "extracted stock kickstart is empty: $KS_ISO_PATH"
@@ -249,7 +290,7 @@ if grep -qE '<<(SET|GENERATE)_[A-Z_]+>>' "$DERIVED_KS"; then
 fi
 
 # ---- derive + patch grub.cfg from the source ISO, per role ------------------
-echo "Deriving grub.cfg from the ISO and patching for role '$ROLE'"
+alog grub "Deriving grub.cfg from the ISO and patching for role '$ROLE'"
 xorriso -osirrox on -indev "$SRC_ISO" -extract /EFI/BOOT/grub.cfg "$WORK/grub-stock.cfg" >/dev/null 2>&1
 
 GRUB_DEFAULT="$GRUB_DEFAULT" KS_ISO_PATH="$KS_ISO_PATH" \
@@ -274,7 +315,7 @@ GRUB_CFG="$WORK/grub.cfg"
 # On UEFI boot the firmware reads grub.cfg from this FAT image, not the ISO-root
 # copy. Method: loop-mount (base 'mount' + kernel vfat — no extra package; needs
 # root) and overwrite grub.cfg; fall back to mtools (mcopy) if not root.
-echo "Patching grub.cfg inside images/efiboot.img"
+alog efiboot "Patching grub.cfg inside images/efiboot.img"
 xorriso -osirrox on -indev "$SRC_ISO" -extract /images/efiboot.img "$WORK/efiboot.img" >/dev/null 2>&1
 chmod u+w "$WORK/efiboot.img"
 
@@ -284,7 +325,7 @@ if [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null; then
   if $SUDO mount -o loop "$WORK/efiboot.img" "$EBMNT" 2>/dev/null; then
     $SUDO cp "$GRUB_CFG" "$EBMNT/EFI/BOOT/grub.cfg"
     $SUDO umount "$EBMNT"; EBMNT=""
-    echo "  (patched via loop-mount — no extra package)"
+    alog efiboot "patched via loop-mount (no extra package)"
     patched=1
   else
     EBMNT=""
@@ -292,14 +333,14 @@ if [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null; then
 fi
 if [ "$patched" -eq 0 ] && command -v mcopy >/dev/null; then
   MTOOLS_SKIP_CHECK=1 mcopy -i "$WORK/efiboot.img" -o "$GRUB_CFG" ::/EFI/BOOT/grub.cfg
-  echo "  (patched via mtools)"
+  alog efiboot "patched via mtools"
   patched=1
 fi
 [ "$patched" -eq 1 ] || die "could not patch efiboot.img: run as root for loop-mount, or install mtools"
 
 # ---- repack the ISO ---------------------------------------------------------
-echo "Injecting  : derived kickstart -> $KS_ISO_PATH"
-echo "             patched grub.cfg -> /EFI/BOOT/grub.cfg  AND  inside /images/efiboot.img"
+alog repack "Injecting derived kickstart -> $KS_ISO_PATH"
+alog repack "Injecting patched grub.cfg -> /EFI/BOOT/grub.cfg AND inside /images/efiboot.img"
 
 xorriso -indev "$SRC_ISO" -outdev "$OUT_ISO" \
   -boot_image any replay \
@@ -310,17 +351,17 @@ xorriso -indev "$SRC_ISO" -outdev "$OUT_ISO" \
 
 # Optional: re-implant the anaconda media checksum if the tool is available.
 if command -v implantisomd5 >/dev/null; then
-  echo "Re-implanting ISO MD5 (implantisomd5)"
-  implantisomd5 "$OUT_ISO" || echo "WARN: implantisomd5 failed (non-fatal)"
+  alog repack "Re-implanting ISO MD5 (implantisomd5)"
+  implantisomd5 "$OUT_ISO" || alog warn "implantisomd5 failed (non-fatal)"
 fi
 
 # Optional: also write the derived kickstart out for inspection/audit. It contains
 # live credentials, so it's opt-in and written 0600.
 if [ -n "$EMIT_KS" ]; then
   cp "$DERIVED_KS" "$EMIT_KS"; chmod 600 "$EMIT_KS"
-  echo "Derived kickstart written to: $EMIT_KS  (SENSITIVE — contains credentials)"
+  alog emit "Derived kickstart written to: $EMIT_KS (SENSITIVE — contains credentials)"
 fi
 
-echo "Done. Golden Veeam appliance ISO ($ROLE): $OUT_ISO"
-echo "Verify injected files:"
+alog repack "Golden Veeam appliance ISO ($ROLE): $OUT_ISO"
+alog verify "Verifying injected files in $OUT_ISO:"
 xorriso -indev "$OUT_ISO" -find "$KS_ISO_PATH" -o -find /EFI/BOOT/grub.cfg 2>/dev/null || true
