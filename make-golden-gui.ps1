@@ -96,7 +96,12 @@ $TransportScript = {
         [switch]$KeepOnFailure,
         [string]$KitRoot
     )
-    $ErrorActionPreference = 'Stop'
+    # Native ssh/scp write progress + banners to stderr; under Windows PowerShell 5.1,
+    # $ErrorActionPreference='Stop' turns ANY native stderr into a TERMINATING error
+    # (a 5.1-only quirk - PowerShell 7 does not). This orchestrator is almost entirely
+    # native-command driven and checks $LASTEXITCODE + throws explicitly after every
+    # step, so Continue is correct here; Stop would abort mid-build on a harmless banner.
+    $ErrorActionPreference = 'Continue'
 
     # ---- helpers ------------------------------------------------------------
     # Marshal a SecureString to plaintext (only at send time; caller clears it ASAP).
@@ -463,6 +468,7 @@ Add-Type -AssemblyName System.Drawing
 # Return the SHA256 fingerprint (e.g. "SHA256:abc...") for a known_hosts-format line.
 function Get-Sha256Fingerprint {
     param([string]$KnownHostsLine)
+    $ErrorActionPreference = 'Continue'   # ssh-keygen writes to stderr; under PS 5.1 + Stop that would throw
     $out = ($KnownHostsLine | & ssh-keygen -lf - 2>$null) | Out-String
     if ($out -match '(SHA256:[A-Za-z0-9+/=]+)') { return $Matches[1] } else { return $null }
 }
@@ -542,6 +548,7 @@ and confirm the SHA256 matches. Do NOT trust a key you cannot verify.
 #   * unknown                  -> type-to-confirm dialog; on Accept, append to known_hosts
 function Confirm-HostKey {
     param([string]$HostOnly)
+    $ErrorActionPreference = 'Continue'   # ssh-keyscan/ssh-keygen banners go to stderr; under PS 5.1 + Stop that throws
     $scan = & ssh-keyscan -T 8 $HostOnly 2>$null | Where-Object { $_ -and $_ -notmatch '^#' }
     if (-not $scan) {
         [System.Windows.Forms.MessageBox]::Show(

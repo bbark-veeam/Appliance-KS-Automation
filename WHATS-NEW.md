@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-25 (v2.0.4)
+- Fixed the GUI throwing an *"Unhandled exception … the running command stopped because ErrorActionPreference … is set to Stop"* error during the SSH host-key check (and which would also have hit the build itself) on Windows PowerShell 5.1. The SSH tools print normal status messages to the error channel, and 5.1 — unlike PowerShell 7 — treats that as fatal when the error preference is "Stop". The SSH/transport steps now tolerate that benign output and rely on explicit exit-code checks, so the host-key dialog and the build proceed normally on 5.1.
+
 ## New changes — 2026-06-25 (v2.0.3)
 - Fixed the GUI failing to start via **`Launch-GUI.cmd`** on Windows PowerShell 5.1 — it threw a cascade of "Unexpected token" parse errors. The PowerShell scripts contained em-dash characters but were saved without a UTF-8 byte-order mark, so Windows PowerShell 5.1 (which the launcher uses) misread them. The scripts are now plain ASCII, so they load correctly under both Windows PowerShell 5.1 and PowerShell 7. (Running directly under PowerShell 7 already worked, which is why it launched in-session but not from the launcher.)
 
