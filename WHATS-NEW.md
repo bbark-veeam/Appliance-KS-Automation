@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-25 (v2.0.5)
+- Added **Confirm password** fields for both veeamadmin and veeamso in the GUI. Because the password boxes are masked, a typo would otherwise only surface when the appliance rejected it after a multi-minute build; the form now checks the two entries match (live) and keeps **Build** disabled until they do — alongside the existing policy and "must differ from veeamadmin" checks.
+
 ## New changes — 2026-06-25 (v2.0.4)
 - Fixed the GUI throwing an *"Unhandled exception … the running command stopped because ErrorActionPreference … is set to Stop"* error during the SSH host-key check (and which would also have hit the build itself) on Windows PowerShell 5.1. The SSH tools print normal status messages to the error channel, and 5.1 — unlike PowerShell 7 — treats that as fatal when the error preference is "Stop". The SSH/transport steps now tolerate that benign output and rely on explicit exit-code checks, so the host-key dialog and the build proceed normally on 5.1.
 

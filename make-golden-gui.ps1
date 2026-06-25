@@ -594,7 +594,7 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = "Veeam Appliance Kickstart - Golden ISO Builder" + ($(if ($kitVersion) { "  (v$kitVersion)" } else { '' }))
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'; $form.MaximizeBox = $false
-$form.ClientSize = New-Object System.Drawing.Size(700, 760)
+$form.ClientSize = New-Object System.Drawing.Size(700, 820)
 $form.AutoScroll = $true
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 
@@ -646,13 +646,17 @@ $sep1 = New-Object System.Windows.Forms.Label; $sep1.SetBounds($LX, $y, 668, 2);
 
 Add-RowLabel "veeamadmin password:" $y | Out-Null
 $txtAdminPw = New-Object System.Windows.Forms.TextBox; $txtAdminPw.SetBounds($CX, $y, 300, 22); $txtAdminPw.UseSystemPasswordChar = $true; $form.Controls.Add($txtAdminPw)
-$chkAdminMfa = New-Object System.Windows.Forms.CheckBox; $chkAdminMfa.SetBounds(($CX + 312), $y, 130, 22); $chkAdminMfa.Text = "Enable MFA"; $form.Controls.Add($chkAdminMfa); $y += 24
+$chkAdminMfa = New-Object System.Windows.Forms.CheckBox; $chkAdminMfa.SetBounds(($CX + 312), $y, 130, 22); $chkAdminMfa.Text = "Enable MFA"; $form.Controls.Add($chkAdminMfa); $y += 26
+Add-RowLabel "confirm password:" $y | Out-Null
+$txtAdminPw2 = New-Object System.Windows.Forms.TextBox; $txtAdminPw2.SetBounds($CX, $y, 300, 22); $txtAdminPw2.UseSystemPasswordChar = $true; $form.Controls.Add($txtAdminPw2); $y += 24
 $lblAdminMsg = New-Object System.Windows.Forms.Label; $lblAdminMsg.SetBounds($CX, $y, $CW, 16); $lblAdminMsg.ForeColor = [System.Drawing.Color]::Firebrick; $form.Controls.Add($lblAdminMsg); $y += 26
 
 $chkVeeamso = New-Object System.Windows.Forms.CheckBox; $chkVeeamso.SetBounds($LX, $y, 400, 22); $chkVeeamso.Text = "Enable Security Officer account (veeamso)"; $chkVeeamso.Checked = $true; $form.Controls.Add($chkVeeamso); $y += 28
 Add-RowLabel "veeamso password:" $y | Out-Null
 $txtSoPw = New-Object System.Windows.Forms.TextBox; $txtSoPw.SetBounds($CX, $y, 300, 22); $txtSoPw.UseSystemPasswordChar = $true; $form.Controls.Add($txtSoPw)
-$chkSoMfa = New-Object System.Windows.Forms.CheckBox; $chkSoMfa.SetBounds(($CX + 312), $y, 130, 22); $chkSoMfa.Text = "MFA (enforced)"; $chkSoMfa.Checked = $true; $chkSoMfa.Enabled = $false; $form.Controls.Add($chkSoMfa); $y += 24
+$chkSoMfa = New-Object System.Windows.Forms.CheckBox; $chkSoMfa.SetBounds(($CX + 312), $y, 130, 22); $chkSoMfa.Text = "MFA (enforced)"; $chkSoMfa.Checked = $true; $chkSoMfa.Enabled = $false; $form.Controls.Add($chkSoMfa); $y += 26
+Add-RowLabel "confirm password:" $y | Out-Null
+$txtSoPw2 = New-Object System.Windows.Forms.TextBox; $txtSoPw2.SetBounds($CX, $y, 300, 22); $txtSoPw2.UseSystemPasswordChar = $true; $form.Controls.Add($txtSoPw2); $y += 24
 $lblSoMsg = New-Object System.Windows.Forms.Label; $lblSoMsg.SetBounds($CX, $y, $CW, 16); $lblSoMsg.ForeColor = [System.Drawing.Color]::Firebrick; $form.Controls.Add($lblSoMsg); $y += 30
 
 # ---- advanced toggle ----
@@ -702,6 +706,7 @@ function Update-FormRules {
     # account is enabled (the kit has no SO-MFA-off path) - so it's shown checked+locked.
     $soOn = $chkVeeamso.Checked
     $txtSoPw.Enabled = $soOn
+    $txtSoPw2.Enabled = $soOn
     $chkSoMfa.Checked = $soOn
     $lblSoMsg.Visible = $soOn
     $txtSoKey.Enabled = ($soOn -and $chkByo.Checked)
@@ -709,18 +714,18 @@ function Update-FormRules {
 }
 function Update-Validation {
     $adminErrs = Test-VeeamPasswordPolicy $txtAdminPw.Text
-    if ($txtAdminPw.Text.Length -eq 0) { $lblAdminMsg.Text = '' }
-    elseif ($adminErrs.Count) { $lblAdminMsg.Text = "needs: " + ($adminErrs -join "; ") }
-    else { $lblAdminMsg.Text = "OK" ; $lblAdminMsg.ForeColor = [System.Drawing.Color]::ForestGreen }
-    if ($adminErrs.Count -or $txtAdminPw.Text.Length -eq 0) { $lblAdminMsg.ForeColor = [System.Drawing.Color]::Firebrick }
+    if ($txtAdminPw.Text.Length -eq 0) { $lblAdminMsg.Text = ''; $okAdmin = $false }
+    elseif ($adminErrs.Count) { $lblAdminMsg.Text = "needs: " + ($adminErrs -join "; "); $lblAdminMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okAdmin = $false }
+    elseif ($txtAdminPw2.Text -cne $txtAdminPw.Text) { $lblAdminMsg.Text = "passwords do not match"; $lblAdminMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okAdmin = $false }
+    else { $lblAdminMsg.Text = "OK"; $lblAdminMsg.ForeColor = [System.Drawing.Color]::ForestGreen; $okAdmin = $true }
 
-    $okAdmin = ($txtAdminPw.Text.Length -gt 0 -and $adminErrs.Count -eq 0)
     $okSo = $true
     if ($chkVeeamso.Checked) {
         $soErrs = Test-VeeamPasswordPolicy $txtSoPw.Text
         if ($txtSoPw.Text.Length -eq 0) { $lblSoMsg.Text = ''; $okSo = $false }
         elseif ($soErrs.Count) { $lblSoMsg.Text = "needs: " + ($soErrs -join "; "); $lblSoMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okSo = $false }
         elseif ($txtSoPw.Text -ceq $txtAdminPw.Text) { $lblSoMsg.Text = "veeamso password must DIFFER from veeamadmin"; $lblSoMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okSo = $false }
+        elseif ($txtSoPw2.Text -cne $txtSoPw.Text) { $lblSoMsg.Text = "passwords do not match"; $lblSoMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okSo = $false }
         else { $lblSoMsg.Text = "OK"; $lblSoMsg.ForeColor = [System.Drawing.Color]::ForestGreen; $okSo = $true }
     }
     $btnBuild.Enabled = ($okAdmin -and $okSo -and -not $script:Building)
@@ -754,7 +759,9 @@ $chkByo.Add_CheckedChanged({
 $cboRole.Add_SelectedIndexChanged({ Update-FormRules; Update-Validation })
 $chkVeeamso.Add_CheckedChanged({ Update-FormRules; Update-Validation })
 $txtAdminPw.Add_TextChanged({ Update-Validation })
+$txtAdminPw2.Add_TextChanged({ Update-Validation })
 $txtSoPw.Add_TextChanged({ Update-Validation })
+$txtSoPw2.Add_TextChanged({ Update-Validation })
 
 # ---- Build -> background runspace + live status feed ------------------------
 $script:Building = $false
@@ -772,7 +779,7 @@ function Add-LogLine { param([string]$Text) $txtLog.AppendText($Text + "`r`n") }
 # not a guaranteed secure erase. The SecureString handed to the build is the protected path;
 # the text box is the unavoidable plaintext entry point.
 function Clear-SensitiveFields {
-    foreach ($tb in @($txtAdminPw, $txtSoPw, $txtAdminKey, $txtSoKey, $txtSoTok)) { if ($tb) { $tb.Clear() } }
+    foreach ($tb in @($txtAdminPw, $txtAdminPw2, $txtSoPw, $txtSoPw2, $txtAdminKey, $txtSoKey, $txtSoTok)) { if ($tb) { $tb.Clear() } }
     [System.GC]::Collect()
 }
 
