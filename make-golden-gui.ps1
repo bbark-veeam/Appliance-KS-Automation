@@ -130,7 +130,10 @@ $TransportScript = {
             $me  = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
             $acl = Get-Acl -LiteralPath $Path
             $acl.SetAccessRuleProtection($true, $false)            # disable inheritance, drop inherited ACEs
-            @($acl.Access) | ForEach-Object { [void]$acl.RemoveAccessRule($_) }   # strip any explicit ACEs
+            # Strip any remaining EXPLICIT ACEs (inherited ones are already gone via the
+            # protection call). Null-guarded: on a freshly downloaded file .Access can come
+            # back empty/null, and @($null) would otherwise pass $null to RemoveAccessRule.
+            foreach ($rule in @($acl.Access)) { if ($rule) { [void]$acl.RemoveAccessRule($rule) } }
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
             $acl.SetOwner($me)
             Set-Acl -LiteralPath $Path -AclObject $acl

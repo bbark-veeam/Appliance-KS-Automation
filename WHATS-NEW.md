@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-25 (v2.0.2)
+- Fixed a noisy warning after a successful build on Windows (*"Could not restrict permissions … Value cannot be null (Parameter 'rule')"*): the step that locks the downloaded ISO + secrets file down to your user account could pass a null value to the permission API when the file had no existing entries to clear. The lockdown now applies cleanly. The build itself always completed regardless — this step is best-effort and only warns — but your built artifacts are now permission-restricted as intended.
+
 ## New changes — 2026-06-25 (v2.0.1)
 - Fixed the **`Launch-GUI.cmd`** double-click launcher not starting on Windows: the file had macOS-style line endings (and a non-ASCII dash) that `cmd.exe` mis-parses. Rewrote it as plain ASCII, added a pause so any launch error stays readable instead of the window vanishing, and added a `.gitattributes` so batch files are always checked out with Windows (CRLF) line endings while the Linux build scripts stay LF. The GUI itself was unaffected — this was only the double-click convenience wrapper (you can always run `make-golden-gui.ps1 -Gui` directly).
 
