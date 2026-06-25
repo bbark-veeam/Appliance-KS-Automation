@@ -1,28 +1,28 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Build a golden Veeam appliance ISO on a remote Linux host, driven from Windows —
+  Build a golden Veeam appliance ISO on a remote Linux host, driven from Windows -
   NON-INTERACTIVELY (the engine behind the single-window GUI).
 
 .DESCRIPTION
-  ORCHESTRATOR ONLY — the ISO is still built on Linux with xorriso. This drives the
+  ORCHESTRATOR ONLY - the ISO is still built on Linux with xorriso. This drives the
   remote build WITHOUT prompts: it uploads the kit + your ISO to a Linux build host,
   runs `make-golden-iso.sh --non-interactive` there, and downloads the built ISO +
   the build LOGS + the secrets file back.
 
   SECRETS handling (Brad-signed-off design, v2.0.0): passwords are taken as
   SecureString, marshalled to plaintext ONLY at the moment of the build, and fed to
-  the remote script over the encrypted SSH channel via STDIN — never on argv, env,
+  the remote script over the encrypted SSH channel via STDIN - never on argv, env,
   or shell history. The plaintext is cleared from memory immediately after. The
   remote build files (filled block, secrets file, ISO) are CLEANED UP on success.
 
   Two ways to run:
-    * Headless transport (Phase 2) — pass parameters; testable from the jumpbox.
-    * Single-window GUI (Phase 3, -Gui) — a WinForms form that collects the same
+    * Headless transport (Phase 2) - pass parameters; testable from the jumpbox.
+    * Single-window GUI (Phase 3, -Gui) - a WinForms form that collects the same
       values and calls the very same transport. Launch it with Launch-GUI.cmd
       (which supplies the -STA WinForms needs), or:  powershell -STA -File this.ps1 -Gui
 
-  Use SSH KEY auth (-IdentityFile) — password auth prompts on every step and can
+  Use SSH KEY auth (-IdentityFile) - password auth prompts on every step and can
   break the build's stdin secret feed.
 
 .EXAMPLE
@@ -64,7 +64,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # =============================================================================
-#  THE TRANSPORT  (Phase 2 engine) — one definition, two call sites:
+#  THE TRANSPORT  (Phase 2 engine) - one definition, two call sites:
 #    * non-GUI path below calls it synchronously in THIS process.
 #    * the GUI runs it in a background runspace (live status, no frozen window).
 #  It is a scriptblock so the GUI runspace gets the full text via .ToString().
@@ -109,19 +109,19 @@ $TransportScript = {
     # POSIX single-quote escaping for any value that ends up interpolated into the
     # remote build command (NTP, hostname prefix, file names, ...). Wraps the value in
     # single quotes and rewrites embedded ' as '\'' so the remote shell treats it
-    # LITERALLY — the security boundary against command injection on the build host.
+    # LITERALLY - the security boundary against command injection on the build host.
     # (The GUI also format-validates these before Build; this is the defense-in-depth
     # layer that holds even if a value reaches the transport unchecked.)
     function ConvertTo-ShSq { param([string]$s) "'" + ($s -replace "'", "'\''") + "'" }
 
-    # Lock a pulled-back artifact down to the current Windows user — the built ISO and
+    # Lock a pulled-back artifact down to the current Windows user - the built ISO and
     # the secrets file both carry CLEARTEXT credentials, so on a shared/multi-user box
     # they should not inherit the output folder's (often wide) ACLs. Mirrors the Linux
     # side's `chmod 600` intent. Local Administrators is deliberately NOT granted: an
     # admin who genuinely needs the file can take ownership (they hold SeTakeOwnership),
     # so least-privilege-by-default is the right posture for a cleartext-credential file.
     # Best-effort: a failure WARNS but never fails the build (the file still exists; the
-    # operator is told to secure/delete it). Windows-only — .NET file ACLs aren't
+    # operator is told to secure/delete it). Windows-only - .NET file ACLs aren't
     # supported elsewhere, so it's a no-op on pwsh/Linux.
     function Protect-LocalFile {
         param([string]$Path)
@@ -139,7 +139,7 @@ $TransportScript = {
             Set-Acl -LiteralPath $Path -AclObject $acl
             Write-TLog -Msg "Restricted ACL on $(Split-Path -Leaf $Path) to current user only"
         } catch {
-            Write-Warning "Could not restrict permissions on '$Path' — it holds CLEARTEXT credentials; secure or delete it manually. ($($_.Exception.Message))"
+            Write-Warning "Could not restrict permissions on '$Path' - it holds CLEARTEXT credentials; secure or delete it manually. ($($_.Exception.Message))"
             Write-TLog -Level Warning -Msg "ACL restriction FAILED on $(Split-Path -Leaf $Path): $($_.Exception.Message)"
         }
     }
@@ -157,22 +157,22 @@ $TransportScript = {
         for ($i = 1; $i -le $Tries; $i++) {
             & $Action
             if ($LASTEXITCODE -eq 0) { return $true }
-            if ($i -lt $Tries) { Write-Warning ("{0} failed (attempt {1}/{2}) — retrying..." -f $What, $i, $Tries) }
+            if ($i -lt $Tries) { Write-Warning ("{0} failed (attempt {1}/{2}) - retrying..." -f $What, $i, $Tries) }
         }
         return $false
     }
 
     # Pull the Linux build logs back (non-secret). Best-effort, with an explicit callout
-    # if nothing comes back — the logs are how a failed run gets diagnosed.
+    # if nothing comes back - the logs are how a failed run gets diagnosed.
     function Receive-RemoteLog {
         # Pull the uniquely-named per-run folder (proxy-<runid>) INTO $OutputDir\logs\.
         # It never pre-exists locally, so scp -r placement is deterministic across scp
         # versions (the old `scp -r .../logs $OutputDir` could land files in the run dir).
         $rf = "$(& ssh @sshOpts $BuildHost "ls -1 '$remote/logs' 2>/dev/null | head -1")".Trim()
-        if (-not $rf) { Write-Warning "Build logs were NOT pulled back (none present on the remote) — diagnose before cleanup."; Write-TLog -Level Warning -Msg "Build logs not pulled (none present on remote)"; return }
+        if (-not $rf) { Write-Warning "Build logs were NOT pulled back (none present on the remote) - diagnose before cleanup."; Write-TLog -Level Warning -Msg "Build logs not pulled (none present on remote)"; return }
         & scp -r @sshOpts "${BuildHost}:${remote}/logs/$rf" "$script:LogDir" 2>$null
         if ($LASTEXITCODE -eq 0) { Write-Host "Build logs saved to $script:LogDir\$rf"; Write-TLog -Msg "Downloaded build logs to $script:LogDir\$rf" }
-        else { Write-Warning "Build logs were NOT pulled back (transfer failed) — diagnose from the remote before it's removed."; Write-TLog -Level Warning -Msg "Build logs not pulled (transfer failed)" }
+        else { Write-Warning "Build logs were NOT pulled back (transfer failed) - diagnose from the remote before it's removed."; Write-TLog -Level Warning -Msg "Build logs not pulled (transfer failed)" }
     }
 
     # Fully remove the remote workdir, with a callout if the removal itself fails (so a
@@ -182,8 +182,8 @@ $TransportScript = {
         if ($LASTEXITCODE -eq 0) { Write-Host "Cleaned up remote workdir."; Write-TLog -Msg "Cleaned up remote workdir $remote" }
         else {
             $o = ($sshOpts -join ' ')
-            Write-Warning "CLEANUP FAILED — the remote workdir may remain at ${BuildHost}:$remote (it holds cleartext credentials). Remove it manually:  ssh $o $BuildHost 'sudo rm -rf $remote'"
-            Write-TLog -Level Error -Msg "cleanup FAILED (rm -rf returned non-zero) — remote workdir may remain: $remote"
+            Write-Warning "CLEANUP FAILED - the remote workdir may remain at ${BuildHost}:$remote (it holds cleartext credentials). Remove it manually:  ssh $o $BuildHost 'sudo rm -rf $remote'"
+            Write-TLog -Level Error -Msg "cleanup FAILED (rm -rf returned non-zero) - remote workdir may remain: $remote"
         }
     }
 
@@ -197,7 +197,7 @@ $TransportScript = {
         if ([string]::IsNullOrWhiteSpace((Get-Variable $req -ValueOnly))) { throw "Missing required parameter: -$req" }
     }
     if (-not $VeeamAdminPassword) { throw "Missing required -VeeamAdminPassword (SecureString)" }
-    if (-not $NoVeeamso -and -not $VeeamsoPassword) { throw "Missing -VeeamsoPassword (SecureString) — or pass -NoVeeamso to disable the account" }
+    if (-not $NoVeeamso -and -not $VeeamsoPassword) { throw "Missing -VeeamsoPassword (SecureString) - or pass -NoVeeamso to disable the account" }
     if (-not (Test-Path -LiteralPath $IsoPath)) { throw "Source ISO not found: $IsoPath" }
     if ($CustomPost -and -not (Test-Path -LiteralPath $CustomPost)) { throw "Custom %post file not found: $CustomPost" }
     $iso = Get-Item -LiteralPath $IsoPath
@@ -239,7 +239,7 @@ $TransportScript = {
 
     # ---- build the make-golden non-interactive flag list (NON-SECRET only) ------
     # Every interpolated value is shell-single-quote-escaped (ConvertTo-ShSq) so it
-    # cannot break out of the remote command line — Role/Ntp/HostnamePrefix and the
+    # cannot break out of the remote command line - Role/Ntp/HostnamePrefix and the
     # custom-post file name are all operator-supplied text.
     $mgFlags = "--non-interactive --role $(ConvertTo-ShSq $Role) --ntp $(ConvertTo-ShSq $Ntp)"
     if ($HostnamePrefix) { $mgFlags += " --hostname-prefix $(ConvertTo-ShSq $HostnamePrefix)" }
@@ -254,13 +254,13 @@ $TransportScript = {
     Write-TLog -Msg "Connecting to $BuildHost (non-interactive build, role=$Role)"
     $hostOnly = $BuildHost -replace '^.*@', ''
     # Capture stderr too so we can classify a failure. A CHANGED host key (accept-new
-    # refuses it) is a hard SECURITY error — possible MITM — and this tool ships
+    # refuses it) is a hard SECURITY error - possible MITM - and this tool ships
     # credentials, so we abort + LOG it explicitly rather than treat it as generic.
     $connOut = & ssh @sshOpts $BuildHost 'mktemp -d' 2>&1
     if ($LASTEXITCODE -ne 0) {
         if (($connOut | Out-String) -match 'REMOTE HOST IDENTIFICATION HAS CHANGED') {
-            Write-TLog -Level Error -Msg "SECURITY ABORT — SSH host key for $hostOnly has CHANGED (possible MITM). No build run; NO credentials sent."
-            throw "SECURITY ALERT: the SSH host key for '$hostOnly' has CHANGED since it was first trusted. This is the classic man-in-the-middle signature, and this tool transmits credentials to the build host — so the run is ABORTED and NOTHING was sent. If the host was legitimately rebuilt, verify its new fingerprint OUT-OF-BAND, then clear the stale key:  ssh-keygen -R '$hostOnly'"
+            Write-TLog -Level Error -Msg "SECURITY ABORT - SSH host key for $hostOnly has CHANGED (possible MITM). No build run; NO credentials sent."
+            throw "SECURITY ALERT: the SSH host key for '$hostOnly' has CHANGED since it was first trusted. This is the classic man-in-the-middle signature, and this tool transmits credentials to the build host - so the run is ABORTED and NOTHING was sent. If the host was legitimately rebuilt, verify its new fingerprint OUT-OF-BAND, then clear the stale key:  ssh-keygen -R '$hostOnly'"
         }
         Write-TLog -Level Error -Msg "SSH connect to $BuildHost failed (host/key/auth/connectivity)"
         throw "Could not open SSH / create a remote work dir on $BuildHost (check host, key/auth, connectivity).`n$($connOut | Out-String)"
@@ -316,9 +316,9 @@ $TransportScript = {
         # ---- run the NON-INTERACTIVE build; secrets piped to STDIN (not argv) ----
         # Prefix is from the privilege probe: '' for root or rootless-mtools, 'sudo -n '
         # for a passwordless sudoer. `sudo -n` never prompts, so it can't read (and eat)
-        # our secret stdin blob — it fails fast instead.
+        # our secret stdin blob - it fails fast instead.
         $isoName = $iso.Name
-        # $remote is mktemp -d output (safe), but $isoName is the operator's file name — escape it.
+        # $remote is mktemp -d output (safe), but $isoName is the operator's file name - escape it.
         $buildCmd = "cd '$remote' && chmod +x *.sh && $($script:SudoPrefix)./make-golden-iso.sh $mgFlags $(ConvertTo-ShSq ('./' + $isoName))"
         Write-Host "`nBuilding on $BuildHost (non-interactive) ..."
         Write-TLog -Msg "Invoking non-interactive build (secrets via stdin; not captured here)"
@@ -341,7 +341,7 @@ $TransportScript = {
             $sep = [array]::IndexOf($info, '---SECRETS---')
             $isoOut = if ($sep -ge 1) { ($info[0..($sep - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
             $secOut = if ($sep -ge 0 -and $sep -lt ($info.Count - 1)) { ($info[($sep + 1)..($info.Count - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
-            if ([string]::IsNullOrWhiteSpace($isoOut)) { throw "No built ISO (*_UNATTENDED.iso) on the remote — the build may not have completed." }
+            if ([string]::IsNullOrWhiteSpace($isoOut)) { throw "No built ISO (*_UNATTENDED.iso) on the remote - the build may not have completed." }
             $built = $true; $isoOut = $isoOut.Trim()
             Write-TLog -Msg "Built ISO: $isoOut"
             Write-Host "`nDownloading built ISO ..."
@@ -351,15 +351,15 @@ $TransportScript = {
             if (-not [string]::IsNullOrWhiteSpace($secOut)) {
                 $secOut = $secOut.Trim()
                 Invoke-Net -What 'secrets download' -Action { & scp @sshOpts "${BuildHost}:${remote}/${secOut}" $OutputDir } | Out-Null
-                Protect-LocalFile (Join-Path $OutputDir $secOut)    # the secrets sheet — most sensitive artifact
-                Write-TLog -Msg "Downloaded secrets file: $secOut (SENSITIVE — contents not logged)"
+                Protect-LocalFile (Join-Path $OutputDir $secOut)    # the secrets sheet - most sensitive artifact
+                Write-TLog -Msg "Downloaded secrets file: $secOut (SENSITIVE - contents not logged)"
             }
             $success = $true
         }
 
         $outResolved = (Resolve-Path $OutputDir).Path
         Write-Host "`nDone. Saved to: $outResolved"
-        Write-TLog -Msg "SUCCESS — saved to $outResolved"
+        Write-TLog -Msg "SUCCESS - saved to $outResolved"
     }
     finally {
         # Defensive: ensure no plaintext blob lingers if we threw before scrubbing.
@@ -368,19 +368,19 @@ $TransportScript = {
 
         # Always pull the logs back (diagnosis on failure, record on success).
         Receive-RemoteLog
-        # DEFAULT = clean up (rm -rf) in every outcome — success OR failure — so nothing
+        # DEFAULT = clean up (rm -rf) in every outcome - success OR failure - so nothing
         # is ever left behind. Keep the remote ONLY if explicitly requested: -KeepRemote
         # (debug, keep even on success) or -KeepOnFailure (keep on a FAILED run so a
         # built-but-undownloaded ISO can be recovered).
         $keep = $KeepRemote -or ((-not $success) -and $KeepOnFailure)
         if ($keep) {
             $why = if ($KeepRemote) { 'KeepRemote' } else { 'KeepOnFailure (run failed)' }
-            Write-Warning "Remote workdir KEPT at ${BuildHost}:$remote ($why) — it holds cleartext credentials."
+            Write-Warning "Remote workdir KEPT at ${BuildHost}:$remote ($why) - it holds cleartext credentials."
             if ($built -and -not $success) {
                 Write-Host "  A built ISO is there; re-pull it:  scp $optStr ${BuildHost}:$remote/*_UNATTENDED.iso `"$OutputDir`""
             }
             Write-Host    "  Delete when done:  ssh $optStr $BuildHost '$($script:SudoPrefix)rm -rf $remote'"
-            Write-TLog -Level Warning -Msg "remote workdir KEPT ($remote) — $why"
+            Write-TLog -Level Warning -Msg "remote workdir KEPT ($remote) - $why"
         }
         else {
             Remove-Remote
@@ -391,7 +391,7 @@ $TransportScript = {
 }
 
 # =============================================================================
-#  SHARED CLIENT-SIDE VALIDATORS (also used by the GUI for live feedback) —
+#  SHARED CLIENT-SIDE VALIDATORS (also used by the GUI for live feedback) -
 #  PowerShell mirror of make-golden-iso.sh's validate_pw / is_b32 / is_guid, so
 #  the form blocks a bad value BEFORE a multi-minute build instead of after.
 # =============================================================================
@@ -436,7 +436,7 @@ function ConvertTo-SecureStringPlain {
 }
 
 # =============================================================================
-#  NON-GUI PATH — run the transport synchronously in this process.
+#  NON-GUI PATH - run the transport synchronously in this process.
 # =============================================================================
 if (-not $Gui) {
     $bound = @{} + $PSBoundParameters
@@ -447,7 +447,7 @@ if (-not $Gui) {
 }
 
 # =============================================================================
-#  GUI PATH (Phase 3) — single-window WinForms form. Requires -STA (Launch-GUI.cmd
+#  GUI PATH (Phase 3) - single-window WinForms form. Requires -STA (Launch-GUI.cmd
 #  supplies it). Collects the same values, validates client-side, confirms the SSH
 #  host key (type-to-confirm), then runs the transport in a background runspace with
 #  a live status feed so the window never freezes during the multi-minute build.
@@ -470,13 +470,13 @@ function Get-Sha256Fingerprint {
 # The Accept/Reject dialog for an UNKNOWN host key. Guards against accidental
 # acceptance: Reject is the default (Enter/Esc reject); Accept stays DISABLED until
 # the operator either pastes the exact expected SHA256 OR types the literal word
-# ACCEPT (AWS-style type-to-confirm — never a one-click checkbox).
+# ACCEPT (AWS-style type-to-confirm - never a one-click checkbox).
 function Show-HostKeyDialog {
     param([string]$HostLabel, [string]$Fingerprint, [string]$KeyType)
     $normShown = ($Fingerprint -replace '(?i)^SHA256:', '').Trim()
 
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Verify SSH host key — $HostLabel"
+    $dlg.Text = "Verify SSH host key - $HostLabel"
     $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $dlg.StartPosition = 'CenterParent'; $dlg.ClientSize = New-Object System.Drawing.Size(560, 360)
 
@@ -490,14 +490,14 @@ Host:        $HostLabel
 Key type:    $KeyType
 Fingerprint: $Fingerprint
 
-Verify this OUT-OF-BAND — on the host itself, run:
+Verify this OUT-OF-BAND - on the host itself, run:
    ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 and confirm the SHA256 matches. Do NOT trust a key you cannot verify.
 "@
     $dlg.Controls.Add($lbl)
 
     $lblPaste = New-Object System.Windows.Forms.Label
-    $lblPaste.SetBounds(12, 172, 536, 18); $lblPaste.Text = "Paste the expected SHA256 fingerprint (preferred — verified + zero click-through):"
+    $lblPaste.SetBounds(12, 172, 536, 18); $lblPaste.Text = "Paste the expected SHA256 fingerprint (preferred - verified + zero click-through):"
     $dlg.Controls.Add($lblPaste)
     $txtPaste = New-Object System.Windows.Forms.TextBox
     $txtPaste.SetBounds(12, 192, 536, 22)
@@ -520,7 +520,7 @@ and confirm the SHA256 matches. Do NOT trust a key you cannot verify.
     $btnReject.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $dlg.Controls.Add($btnReject)
 
-    # Reject is BOTH the Accept- and Cancel-button so Enter AND Esc reject — Accept is
+    # Reject is BOTH the Accept- and Cancel-button so Enter AND Esc reject - Accept is
     # never reachable by a reflexive keypress; only an explicit click after verifying.
     $dlg.AcceptButton = $btnReject
     $dlg.CancelButton = $btnReject
@@ -558,8 +558,8 @@ function Confirm-HostKey {
         if ($match) { return $true }   # known + matches -> proceed
         # known but the live key does NOT match any stored key = CHANGED. Hard refuse.
         [System.Windows.Forms.MessageBox]::Show(
-            "SECURITY ALERT: the SSH host key for '$HostOnly' has CHANGED since it was first trusted.`n`nThis is the classic man-in-the-middle signature, and this tool transmits credentials. The build is REFUSED — there is no accept path.`n`nIf the host was legitimately rebuilt, verify its new fingerprint OUT-OF-BAND, then clear the stale key from a terminal:`n   ssh-keygen -R $HostOnly",
-            "SSH host key CHANGED — refused", 'OK', 'Error') | Out-Null
+            "SECURITY ALERT: the SSH host key for '$HostOnly' has CHANGED since it was first trusted.`n`nThis is the classic man-in-the-middle signature, and this tool transmits credentials. The build is REFUSED - there is no accept path.`n`nIf the host was legitimately rebuilt, verify its new fingerprint OUT-OF-BAND, then clear the stale key from a terminal:`n   ssh-keygen -R $HostOnly",
+            "SSH host key CHANGED - refused", 'OK', 'Error') | Out-Null
         return $false
     }
 
@@ -584,7 +584,7 @@ function Confirm-HostKey {
 $kitVersion = try { (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -ErrorAction Stop | Select-Object -First 1).Trim() } catch { '' }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Veeam Appliance Kickstart — Golden ISO Builder" + ($(if ($kitVersion) { "  (v$kitVersion)" } else { '' }))
+$form.Text = "Veeam Appliance Kickstart - Golden ISO Builder" + ($(if ($kitVersion) { "  (v$kitVersion)" } else { '' }))
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'; $form.MaximizeBox = $false
 $form.ClientSize = New-Object System.Drawing.Size(700, 760)
@@ -597,7 +597,7 @@ function Add-RowLabel { param([string]$Text, [int]$Top, [int]$Width = 190)
 
 $banner = New-Object System.Windows.Forms.Label
 $banner.SetBounds($LX, $y, 668, 16); $banner.ForeColor = [System.Drawing.Color]::DimGray
-$banner.Text = "Community tool — NOT an official Veeam product. Builds on a remote Linux host over SSH."
+$banner.Text = "Community tool - NOT an official Veeam product. Builds on a remote Linux host over SSH."
 $form.Controls.Add($banner); $y += 28
 
 # Linux host + SSH login
@@ -669,7 +669,7 @@ $txtSoKey = New-Object System.Windows.Forms.TextBox; $txtSoKey.SetBounds(216, $a
 $lblSoTok = New-Object System.Windows.Forms.Label; $lblSoTok.SetBounds(12, ($ay + 3), 200, 18); $lblSoTok.Text = "veeamso recovery token (GUID):"; $grpAdv.Controls.Add($lblSoTok)
 $txtSoTok = New-Object System.Windows.Forms.TextBox; $txtSoTok.SetBounds(216, $ay, 300, 22); $txtSoTok.Enabled = $false; $grpAdv.Controls.Add($txtSoTok)
 
-# Bottom panel (Build + status + log) — repositioned when Advanced toggles.
+# Bottom panel (Build + status + log) - repositioned when Advanced toggles.
 $pnlBottom = New-Object System.Windows.Forms.Panel
 $pnlBottom.SetBounds(0, ($y + 8), 700, 240); $form.Controls.Add($pnlBottom)
 $btnBuild = New-Object System.Windows.Forms.Button; $btnBuild.SetBounds($LX, 4, 160, 32); $btnBuild.Text = "Build ISO"; $btnBuild.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold); $pnlBottom.Controls.Add($btnBuild)
@@ -683,7 +683,7 @@ $pnlBottom.Top = $advCollapsedTop
 # ---- field-rule helpers -----------------------------------------------------
 function Update-FormRules {
     $isHR = ($cboRole.SelectedItem -eq 'hardened-repo')
-    # HR forces MFA on BOTH accounts and requires the SO account — lock those controls on.
+    # HR forces MFA on BOTH accounts and requires the SO account - lock those controls on.
     if ($isHR) {
         $chkVeeamso.Checked = $true; $chkVeeamso.Enabled = $false
         $chkAdminMfa.Checked = $true; $chkAdminMfa.Enabled = $false
@@ -692,7 +692,7 @@ function Update-FormRules {
         $chkAdminMfa.Enabled = $true
     }
     # veeamso fields follow the enable checkbox. veeamso MFA is ALWAYS enforced when the
-    # account is enabled (the kit has no SO-MFA-off path) — so it's shown checked+locked.
+    # account is enabled (the kit has no SO-MFA-off path) - so it's shown checked+locked.
     $soOn = $chkVeeamso.Checked
     $txtSoPw.Enabled = $soOn
     $chkSoMfa.Checked = $soOn
@@ -761,7 +761,7 @@ function Add-LogLine { param([string]$Text) $txtLog.AppendText($Text + "`r`n") }
 
 # Wipe the cleartext password / BYO-secret text boxes. CAVEAT: .NET strings are immutable
 # and GC-managed, so a typed value can still linger in process memory / the page file until
-# collected — this clears the LIVE UI surface (shoulder-surf, idle form, accidental re-use),
+# collected - this clears the LIVE UI surface (shoulder-surf, idle form, accidental re-use),
 # not a guaranteed secure erase. The SecureString handed to the build is the protected path;
 # the text box is the unavoidable plaintext entry point.
 function Clear-SensitiveFields {
@@ -788,7 +788,7 @@ $timer.Add_Tick({
         $script:ps.Dispose(); $script:ps = $null
         $script:Building = $false
         if ($failed) {
-            $lblStatus.Text = "Build FAILED — see the log below."
+            $lblStatus.Text = "Build FAILED - see the log below."
             $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
             Add-LogLine "==== BUILD FAILED ===="
             if ($emsg) { Add-LogLine $emsg }
@@ -833,10 +833,10 @@ $btnBuild.Add_Click({
         if ($chkVeeamso.Checked -and $txtSoTok.Text.Trim() -and -not (Test-Guid ($txtSoTok.Text.Trim()))) { [System.Windows.Forms.MessageBox]::Show("veeamso recovery token must be a GUID (XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX).", "Bad token", 'OK', 'Warning') | Out-Null; return }
     }
 
-    # ---- host-key type-to-confirm (DECISION 4) — BEFORE any credential leaves ----
+    # ---- host-key type-to-confirm (DECISION 4) - BEFORE any credential leaves ----
     $lblStatus.Text = "Verifying SSH host key..."; $lblStatus.ForeColor = [System.Drawing.Color]::Black
     if (-not (Confirm-HostKey -HostOnly $hostName)) {
-        $lblStatus.Text = "Host key not accepted — build cancelled."; $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
+        $lblStatus.Text = "Host key not accepted - build cancelled."; $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
         return
     }
 
@@ -876,7 +876,7 @@ $btnBuild.Add_Click({
     $script:infoIdx = 0; $script:warnIdx = 0; $script:errIdx = 0
     $script:Building = $true
     $btnBuild.Enabled = $false
-    $lblStatus.Text = "Building on $hostName — this takes several minutes (ISO upload + build + pull)..."
+    $lblStatus.Text = "Building on $hostName - this takes several minutes (ISO upload + build + pull)..."
     $lblStatus.ForeColor = [System.Drawing.Color]::Black
     Add-LogLine "Starting build. Secrets are sent only over the SSH channel via stdin; the remote workdir is cleaned up at the end."
 

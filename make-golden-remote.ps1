@@ -4,13 +4,13 @@
   Build a golden Veeam appliance ISO on a remote Linux host, driven from Windows.
 
 .DESCRIPTION
-  ORCHESTRATOR ONLY — this does NOT build the ISO on Windows. The repack still runs
+  ORCHESTRATOR ONLY - this does NOT build the ISO on Windows. The repack still runs
   on Linux with xorriso (the only reliable way to preserve the appliance's UEFI boot).
   This script just automates the push -> build -> pull dance over SSH:
 
     1. uploads the kit + your source ISO to a Linux build host,
     2. runs make-golden-iso.sh there INTERACTIVELY (you answer the role/password/NTP
-       prompts live in this window — passwords are entered on the Linux side and never
+       prompts live in this window - passwords are entered on the Linux side and never
        touch this script or PowerShell history),
     3. downloads the built *_UNATTENDED.iso (and the secrets file) back here,
     4. on SUCCESS, deletes the remote copies (they contain cleartext credentials).
@@ -19,7 +19,7 @@
 
   STRONGLY RECOMMENDED: use SSH KEY auth (-IdentityFile, or an ssh-agent key). With a
   password, Windows OpenSSH cannot reuse one connection, so you'll be prompted on every
-  step — and a single mistyped password can interrupt the run. A key = zero prompts.
+  step - and a single mistyped password can interrupt the run. A key = zero prompts.
 
   REQUIREMENTS:
     - Windows OpenSSH client (ssh.exe / scp.exe). Install once if missing:
@@ -44,7 +44,7 @@
 
 .PARAMETER KeepRemote
   Debug only: skip remote cleanup even on success. Leaves cleartext credentials on the
-  build host — delete them by hand afterward.
+  build host - delete them by hand afterward.
 
 .EXAMPLE
   .\make-golden-remote.ps1 -BuildHost root@10.0.0.50 -IsoPath .\VeeamInfrastructureAppliance_<version>.iso -IdentityFile ~\.ssh\id_ed25519
@@ -77,8 +77,8 @@ if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Pa
 
 # ---- transport log (Veeam job-style; this .ps1 is the Windows orchestrator) --
 # Thin, FILE-ONLY record of THIS script's push/build/pull/cleanup actions (the
-# friendly console output is unchanged). It NEVER handles secrets — the build is
-# interactive on Linux — so it cannot leak any. The authoritative job + agent
+# friendly console output is unchanged). It NEVER handles secrets - the build is
+# interactive on Linux - so it cannot leak any. The authoritative job + agent
 # logs are produced on Linux and pulled back after the build.
 # All logs (this transport log + the pulled-back per-run folder) live under
 # $OutputDir\logs\ (the ISO + secrets file stay in $OutputDir root).
@@ -121,7 +121,7 @@ function Invoke-Net {
     for ($i = 1; $i -le $Tries; $i++) {
         & $Action
         if ($LASTEXITCODE -eq 0) { return $true }
-        if ($i -lt $Tries) { Write-Warning ("{0} failed (attempt {1}/{2}) — retrying..." -f $What, $i, $Tries) }
+        if ($i -lt $Tries) { Write-Warning ("{0} failed (attempt {1}/{2}) - retrying..." -f $What, $i, $Tries) }
     }
     return $false
 }
@@ -131,13 +131,13 @@ Write-Host "Connecting to $BuildHost ..."
 Write-TLog -Msg "Connecting to $BuildHost"
 $hostOnly = $BuildHost -replace '^.*@', ''
 # Capture stderr too so we can classify a failure. A CHANGED host key (accept-new
-# refuses it) is a hard SECURITY error — possible MITM — and this tool ships
+# refuses it) is a hard SECURITY error - possible MITM - and this tool ships
 # credentials, so we abort + LOG it explicitly rather than treat it as generic.
 $connOut = & ssh @sshOpts $BuildHost 'mktemp -d' 2>&1
 if ($LASTEXITCODE -ne 0) {
     if (($connOut | Out-String) -match 'REMOTE HOST IDENTIFICATION HAS CHANGED') {
-        Write-TLog -Level Error -Msg "SECURITY ABORT — SSH host key for $hostOnly has CHANGED (possible MITM). No build run; NO credentials sent."
-        throw "SECURITY ALERT: the SSH host key for '$hostOnly' has CHANGED since it was first trusted. This is the classic man-in-the-middle signature, and this tool transmits credentials to the build host — so the run is ABORTED and NOTHING was sent. If the host was legitimately rebuilt, verify its new fingerprint OUT-OF-BAND, then clear the stale key:  ssh-keygen -R '$hostOnly'"
+        Write-TLog -Level Error -Msg "SECURITY ABORT - SSH host key for $hostOnly has CHANGED (possible MITM). No build run; NO credentials sent."
+        throw "SECURITY ALERT: the SSH host key for '$hostOnly' has CHANGED since it was first trusted. This is the classic man-in-the-middle signature, and this tool transmits credentials to the build host - so the run is ABORTED and NOTHING was sent. If the host was legitimately rebuilt, verify its new fingerprint OUT-OF-BAND, then clear the stale key:  ssh-keygen -R '$hostOnly'"
     }
     Write-TLog -Level Error -Msg "SSH connect to $BuildHost failed (host/key/auth/connectivity)"
     throw "Could not open an SSH session / create a remote working dir on $BuildHost (check host, key/auth, connectivity).`n$($connOut | Out-String)"
@@ -176,7 +176,7 @@ try {
         throw "Kit upload failed."
     }
 
-    Write-Host ("Uploading ISO ({0:N2} GB) — large transfer, please wait ..." -f ($iso.Length / 1GB))
+    Write-Host ("Uploading ISO ({0:N2} GB) - large transfer, please wait ..." -f ($iso.Length / 1GB))
     Write-TLog -Msg ("Uploading source ISO {0} ({1:N2} GB)" -f $iso.Name, ($iso.Length / 1GB))
     if (-not (Invoke-Net -What 'ISO upload' -Action { & scp @sshOpts $iso.FullName "${BuildHost}:${remote}/" })) {
         Write-TLog -Level Error -Msg "ISO upload failed"
@@ -186,7 +186,7 @@ try {
     # ---- interactive build (you answer the prompts) -------------------------
     $isoName = $iso.Name
     $buildCmd = "cd '$remote' && chmod +x *.sh && $($script:SudoPrefix)./make-golden-iso.sh './$isoName'"
-    Write-Host "`n=== Starting interactive build on $BuildHost — answer the prompts below ===`n"
+    Write-Host "`n=== Starting interactive build on $BuildHost - answer the prompts below ===`n"
     Write-TLog -Msg "Invoking interactive build (credentials entered on Linux; not captured here)"
     & ssh -t @sshOpts $BuildHost $buildCmd
     if ($LASTEXITCODE -ne 0) {
@@ -203,7 +203,7 @@ try {
     $isoOut = if ($sep -ge 1) { ($info[0..($sep - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
     $secOut = if ($sep -ge 0 -and $sep -lt ($info.Count - 1)) { ($info[($sep + 1)..($info.Count - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
     if ([string]::IsNullOrWhiteSpace($isoOut)) {
-        throw "No built ISO (*_UNATTENDED.iso) found on the remote — the build may not have completed."
+        throw "No built ISO (*_UNATTENDED.iso) found on the remote - the build may not have completed."
     }
     $built = $true
     $isoOut = $isoOut.Trim()
@@ -218,12 +218,12 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($secOut)) {
         $secOut = $secOut.Trim()
         Invoke-Net -What 'secrets download' -Action { & scp @sshOpts "${BuildHost}:${remote}/${secOut}" $OutputDir } | Out-Null
-        Write-TLog -Msg "Downloaded secrets file: $secOut (SENSITIVE — contents not logged)"
+        Write-TLog -Msg "Downloaded secrets file: $secOut (SENSITIVE - contents not logged)"
     }
 
     # Pull the Linux job + agent logs back (non-secret). Pull the uniquely-named
     # per-run folder INTO $OutputDir\logs\ for deterministic placement across scp
-    # versions. Best-effort — never fail the run over logs.
+    # versions. Best-effort - never fail the run over logs.
     Write-Host "Downloading build logs (job + agent) ..."
     $rf = "$(& ssh @sshOpts $BuildHost "ls -1 '$remote/logs' 2>/dev/null | head -1")".Trim()
     if ($rf) {
@@ -234,12 +234,12 @@ try {
 
     $success = $true
     $outResolved = (Resolve-Path $OutputDir).Path
-    Write-TLog -Msg "SUCCESS — saved to $outResolved (ISO: $isoOut)"
+    Write-TLog -Msg "SUCCESS - saved to $outResolved (ISO: $isoOut)"
     Write-Host "`nDone. Saved to: $outResolved"
     Write-Host "  ISO     : $isoOut"
     if (-not [string]::IsNullOrWhiteSpace($secOut)) {
         Write-Host "  Secrets : $secOut"
-        Write-Host "  NOTE: the ISO and the secrets file contain cleartext credentials — store them securely and delete after the fleet rollout."
+        Write-Host "  NOTE: the ISO and the secrets file contain cleartext credentials - store them securely and delete after the fleet rollout."
     }
 }
 finally {
@@ -251,11 +251,11 @@ finally {
     }
     elseif ($KeepRemote) {
         Write-Warning "KeepRemote set: remote copies (with cleartext credentials) left at ${BuildHost}:$remote. Remove manually:  ssh $optStr $BuildHost 'sudo rm -rf $remote'"
-        Write-TLog -Level Warning -Msg "KeepRemote set: remote workdir kept ($remote) — holds cleartext credentials"
+        Write-TLog -Level Warning -Msg "KeepRemote set: remote workdir kept ($remote) - holds cleartext credentials"
     }
     else {
-        # Failure path — DO NOT delete; the built ISO may still be there. Let the user retry the pull.
-        Write-Warning "Run did not complete — the remote dir is KEPT so you don't lose the build:"
+        # Failure path - DO NOT delete; the built ISO may still be there. Let the user retry the pull.
+        Write-Warning "Run did not complete - the remote dir is KEPT so you don't lose the build:"
         Write-Host    "    ${BuildHost}:$remote"
         if ($built) {
             Write-Host "  The ISO built successfully; only the transfer failed. Retry just the download:"
@@ -263,7 +263,7 @@ finally {
         }
         Write-Host    "  When you're done, DELETE the remote copy (it holds cleartext credentials):"
         Write-Host    "    ssh $optStr $BuildHost 'sudo rm -rf $remote'"
-        Write-TLog -Level Error -Msg "Run did not complete — remote workdir kept ($remote)"
+        Write-TLog -Level Error -Msg "Run did not complete - remote workdir kept ($remote)"
     }
     if ($success) { Write-TLog -Msg "TRANSPORT RESULT: SUCCESS" }
     else { Write-TLog -Level Error -Msg "TRANSPORT RESULT: FAILURE" }
