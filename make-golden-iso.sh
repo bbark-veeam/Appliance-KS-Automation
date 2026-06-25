@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# make-golden-iso.sh — guided, end-to-end build of a golden Veeam appliance ISO
+# make-golden-iso.sh — guided (or non-interactive) end-to-end build of a golden
+#                      Veeam appliance ISO
 # =============================================================================
 # Interactive "easy button" that runs the whole prepare + build flow:
 #   - select role: proxy | vmware-proxy | hardened-repo (VIA ISO) | vsa | vbem (VSA ISO)
@@ -20,7 +21,22 @@
 # RUN ON LINUX (or WSL). Use --prep-only to do the prepare steps anywhere and
 # build later on Linux.
 #
-# Usage:  ./make-golden-iso.sh [--prep-only] [source-iso] [output-iso]
+# Usage (interactive):   ./make-golden-iso.sh [--prep-only] [source-iso] [output-iso]
+#
+# NON-INTERACTIVE (drives the GUI / scripted builds — no prompts):
+#   ./make-golden-iso.sh --non-interactive --role <role> [--hostname-prefix P]
+#       --ntp <servers> [--skip-ntp-sync] [--veeamadmin-mfa] [--no-veeamso]
+#       [--byo-keys] [--custom-post FILE] [--prep-only] [source-iso] [output-iso]
+#   ...with the SECRETS piped on STDIN (never argv/env/history), one key=value per
+#   line (comments '#...' and blank lines ignored):
+#       veeamadmin.password=...
+#       veeamso.password=...            (required unless --no-veeamso)
+#       veeamadmin.mfaSecretKey=...     (optional; only honored with --byo-keys)
+#       veeamso.mfaSecretKey=...        (optional; only honored with --byo-keys)
+#       veeamso.recoveryToken=...       (optional; only honored with --byo-keys)
+#   In non-interactive mode the secrets summary is NOT printed to the console
+#   (it would travel back over SSH); the sensitivity-noted secrets FILE is the
+#   only secret output.
 # =============================================================================
 set -euo pipefail
 
@@ -29,8 +45,7 @@ BUILD="$HERE/build-appliance-iso.sh"
 KIT_VERSION="$(tr -d '[:space:]' < "$HERE/VERSION" 2>/dev/null || true)"; KIT_VERSION="${KIT_VERSION:-unknown}"
 CMDLINE="$*"
 
-# Veeam-style logging (this is the "job"/orchestrator, so it uses the job format).
-# No-op shims if the lib is missing so the script still runs.
+# Veeam-style logging (job/orchestrator format). No-op shims if the lib is missing.
 if [ -f "$HERE/kslog.sh" ]; then
   # shellcheck source=kslog.sh
   . "$HERE/kslog.sh"
@@ -41,25 +56,39 @@ fi
 PREP_ONLY=0
 NO_LOG=""
 JOB_LOG=""; LOG_DIR=""; RUN_ID=""
-ARGS=()
+# Non-interactive mode: non-secret inputs via flags; SECRETS via STDIN only.
+NI=0; NI_ROLE=""; NI_PREFIX=""; NI_NTP=""; NI_SKIPNTP=0
+NI_ADMIN_MFA=0; NI_SO=1; NI_BYO=0; NI_CPOST=""
+ARGS=(); NEXT=""
 for a in "$@"; do
+  if [ -n "$NEXT" ]; then
+    case "$NEXT" in
+      role) NI_ROLE="$a" ;;  prefix) NI_PREFIX="$a" ;;  ntp) NI_NTP="$a" ;;  cpost) NI_CPOST="$a" ;;
+    esac
+    NEXT=""; continue
+  fi
   case "$a" in
-    --prep-only) PREP_ONLY=1 ;;
-    --no-log)    NO_LOG=1 ;;
+    --prep-only)            PREP_ONLY=1 ;;
+    --no-log)               NO_LOG=1 ;;
+    --non-interactive|--ni) NI=1 ;;
+    --role)                 NEXT=role ;;    --role=*)               NI_ROLE="${a#*=}" ;;
+    --hostname-prefix)      NEXT=prefix ;;  --hostname-prefix=*)    NI_PREFIX="${a#*=}" ;;
+    --ntp)                  NEXT=ntp ;;     --ntp=*)                NI_NTP="${a#*=}" ;;
+    --custom-post)          NEXT=cpost ;;   --custom-post=*)        NI_CPOST="${a#*=}" ;;
+    --skip-ntp-sync)        NI_SKIPNTP=1 ;;
+    --veeamadmin-mfa)       NI_ADMIN_MFA=1 ;;
+    --no-veeamso)           NI_SO=0 ;;
+    --byo-keys)             NI_BYO=1 ;;
     *) ARGS+=("$a") ;;
   esac
 done
 SRC_ISO="${ARGS[0]:-}"
 OUT_ISO="${ARGS[1]:-}"
 
-# jrec: append a job-format line to the job log FILE only. The interactive console
-# keeps its friendly output, and because we NEVER tee, the secrets summary printed
-# to the console below can't reach the log file.
+# jrec: append a job-format line to the job log FILE only (never tee → the secrets
+# summary printed to the console can't reach the log file).
 jrec() { [ -n "$JOB_LOG" ] && jlog "$@" >> "$JOB_LOG" || true; }
-
 die() { echo "ERROR: $*" >&2; jrec Error "$*"; exit 1; }
-
-# Job result line on exit (covers a failed build: set -e propagates its exit code).
 on_exit() {
   local rc=$?
   [ -z "$JOB_LOG" ] && return 0
@@ -68,61 +97,22 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# Role name -> per-role settings (interactive menu + non-interactive both use this).
+set_role_vars() {  # $1 = role name; sets ROLE/ISO_GLOB/DEF_PREFIX; returns 1 if unknown
+  case "$1" in
+    proxy)         ROLE=proxy;         ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vprx ;;
+    vmware-proxy)  ROLE=vmware-proxy;  ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vinf ;;
+    hardened-repo) ROLE=hardened-repo; ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vlhr ;;
+    vsa)           ROLE=vsa;           ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbr  ;;
+    vbem)          ROLE=vbem;          ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbem ;;
+    *) return 1 ;;
+  esac
+}
+
 command -v python3 >/dev/null || die "python3 is required"
 [[ $PREP_ONLY -eq 1 || -f "$BUILD" ]] || die "build-appliance-iso.sh not found next to this script"
 
-echo "============================================================"
-echo " Veeam Appliance — Golden ISO Builder   (kit v$KIT_VERSION)"
-echo "============================================================"
-
-# ---- role selection ---------------------------------------------------------
-echo
-echo "Select appliance role:"
-echo "   [1] proxy          — VIA: generic backup proxy"
-echo "   [2] vmware-proxy   — VIA: VMware proxy with iSCSI & NVMe/TCP storage connectivity"
-echo "   [3] hardened-repo  — VIA: Veeam Hardened Repository (forces MFA on BOTH accounts)"
-echo "   [4] vsa            — VSA: Veeam Backup & Replication server"
-echo "   [5] vbem           — VSA: Veeam Backup Enterprise Manager"
-while true; do
-  read -rp "  Role [1/2/3/4/5]: " r || die "input ended"
-  case "$r" in
-    1|proxy)             ROLE=proxy;         ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vprx; break ;;
-    2|vmware-proxy|vmw)  ROLE=vmware-proxy;  ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vinf; break ;;
-    3|hardened-repo|hr)  ROLE=hardened-repo; ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vlhr; break ;;
-    4|vsa)               ROLE=vsa;           ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbr;  break ;;
-    5|vbem|em)           ROLE=vbem;          ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbem; break ;;
-    *) echo "  ✗ enter 1, 2, 3, 4, or 5" >&2 ;;
-  esac
-done
-KSNAME=unattended-block.tmpl
-KS="$HERE/$KSNAME"
-[[ -f "$KS" ]] || die "$KSNAME not found next to this script"
-echo "  -> role: $ROLE  (fills the unattended block; stock kickstart comes from the ISO)"
-
-# ---- job log (Veeam job format; always-on, --no-log to disable) -------------
-# File-only (no tee) so the secrets summary can't reach it. Export the run id +
-# log dir so the build agent writes its agent log into the SAME per-run folder.
-if [ -z "$NO_LOG" ]; then
-  RUN_ID="$(kslog_runid "$ROLE")"; export KSLOG_RUN_ID="$RUN_ID"
-  LOG_DIR="$HERE/logs/$RUN_ID"; export KSLOG_DIR="$LOG_DIR"
-  mkdir -p "$LOG_DIR" || die "could not create log dir: $LOG_DIR"
-  JOB_LOG="$LOG_DIR/Job.make-golden.$ROLE.log"
-  kslog_job_header "make-golden-iso.sh" "$KIT_VERSION" "$RUN_ID" "$CMDLINE" >> "$JOB_LOG"
-  echo "  -> job log: $JOB_LOG"
-fi
-jrec Info "Role: $ROLE"
-
-# Custom %post / --no-log pass-through to the build agent.
-NOLOGOPT=(); [ -n "$NO_LOG" ] && NOLOGOPT=(--no-log)
-
-# Confirm overwrite if the block was already filled (real tokens, not comments).
-if ! grep -qE '<<(SET|GENERATE)_[A-Z_]+>>' "$KS"; then
-  echo "WARNING: $KSNAME has no placeholders left — it appears already filled."
-  read -rp "Re-running overwrites its credentials / NTP / keys. Continue? [Y/N] (Default behavior is No) " ans || exit 1
-  [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
-fi
-
-# ---- helpers ----------------------------------------------------------------
+# ---- validators (shared by interactive + non-interactive) -------------------
 validate_pw() {  # $1=password $2=label -> nonzero (prints reasons) if it fails the policy
   PW="$1" PW_LABEL="$2" python3 - <<'PY'
 import os, re, sys
@@ -135,7 +125,6 @@ if not re.search(r'[0-9]', pw):         errs.append("a digit")
 if not re.search(r'[^A-Za-z0-9]', pw):  errs.append("a special character")
 # DISA RHEL8 STIG (what the appliance enforces): max 4 consecutive of the same
 # class (maxclassrepeat=4) AND max 3 consecutive identical chars (maxrepeat=3).
-# Classes: Upper / Lower / Digit / Special.
 cls = lambda c: 'U' if c.isupper() else 'L' if c.islower() else 'D' if c.isdigit() else 'S'
 class_run = ident_run = 1
 for i in range(1, len(pw)):
@@ -152,6 +141,8 @@ if errs:
     sys.exit(1)
 PY
 }
+is_b32()  { [[ "$1" =~ ^[A-Z2-7]{16}$ ]]; }                                                   # 16-char Base32
+is_guid() { [[ "$1" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; }
 prompt_password() {  # $1=label $2=output-var
   local label="$1" __out="$2" pw pw2
   while true; do
@@ -162,9 +153,7 @@ prompt_password() {  # $1=label $2=output-var
     printf -v "$__out" '%s' "$pw"; break
   done
 }
-is_b32()  { [[ "$1" =~ ^[A-Z2-7]{16}$ ]]; }                                                   # 16-char Base32
-is_guid() { [[ "$1" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; }
-prompt_optional() {  # $1=label $2=validator-fn $3=output-var ; blank => leave empty (auto-generate)
+prompt_optional() {  # $1=label $2=validator-fn $3=output-var ; blank => empty (auto-generate)
   local label="$1" vfn="$2" __out="$3" val
   while true; do
     read -rp "  $label (blank = auto-generate): " val || die "input ended"
@@ -174,111 +163,246 @@ prompt_optional() {  # $1=label $2=validator-fn $3=output-var ; blank => leave e
   done
 }
 
+# ---- secrets: NI reads them from STDIN (never argv/env); interactive prompts --
+ADMIN_PW=""; SO_PW=""; ADMIN_MFA=""; SO_MFA=""; TOKEN=""; SO_PW_GIVEN=0
+if [ "$NI" = 1 ]; then
+  [ -t 0 ] && die "--non-interactive requires the secret key=value blob on stdin"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      veeamadmin.password)     ADMIN_PW="$v" ;;
+      veeamso.password)        SO_PW="$v"; SO_PW_GIVEN=1 ;;
+      veeamadmin.mfaSecretKey) ADMIN_MFA="$v" ;;
+      veeamso.mfaSecretKey)    SO_MFA="$v" ;;
+      veeamso.recoveryToken)   TOKEN="$v" ;;
+      *) die "unknown stdin secret key: $k" ;;
+    esac
+  done
+fi
+
+echo "============================================================"
+echo " Veeam Appliance — Golden ISO Builder   (kit v$KIT_VERSION)"
+if [ "$NI" = 1 ]; then echo " (non-interactive mode)"; fi
+echo "============================================================"
+
+# ---- role -------------------------------------------------------------------
+if [ "$NI" = 1 ]; then
+  [ -n "$NI_ROLE" ] || die "--role is required in non-interactive mode"
+  set_role_vars "$NI_ROLE" || die "unknown --role '$NI_ROLE' (proxy|vmware-proxy|hardened-repo|vsa|vbem)"
+else
+  echo
+  echo "Select appliance role:"
+  echo "   [1] proxy          — VIA: generic backup proxy"
+  echo "   [2] vmware-proxy   — VIA: VMware proxy with iSCSI & NVMe/TCP storage connectivity"
+  echo "   [3] hardened-repo  — VIA: Veeam Hardened Repository (forces MFA on BOTH accounts)"
+  echo "   [4] vsa            — VSA: Veeam Backup & Replication server"
+  echo "   [5] vbem           — VSA: Veeam Backup Enterprise Manager"
+  while true; do
+    read -rp "  Role [1/2/3/4/5]: " r || die "input ended"
+    case "$r" in
+      1|proxy)            name=proxy ;;
+      2|vmware-proxy|vmw) name=vmware-proxy ;;
+      3|hardened-repo|hr) name=hardened-repo ;;
+      4|vsa)              name=vsa ;;
+      5|vbem|em)          name=vbem ;;
+      *) echo "  ✗ enter 1, 2, 3, 4, or 5" >&2; continue ;;
+    esac
+    set_role_vars "$name"; break
+  done
+fi
+KSNAME=unattended-block.tmpl
+KS="$HERE/$KSNAME"
+[[ -f "$KS" ]] || die "$KSNAME not found next to this script"
+[ "$NI" = 1 ] || echo "  -> role: $ROLE  (fills the unattended block; stock kickstart comes from the ISO)"
+
+# ---- job log (always-on; --no-log to disable) -------------------------------
+# File-only (no tee) so the secrets summary can't reach it. Export the run id +
+# log dir so the build agent writes its agent log into the SAME per-run folder.
+if [ -z "$NO_LOG" ]; then
+  RUN_ID="$(kslog_runid "$ROLE")"; export KSLOG_RUN_ID="$RUN_ID"
+  LOG_DIR="$HERE/logs/$RUN_ID"; export KSLOG_DIR="$LOG_DIR"
+  mkdir -p "$LOG_DIR" || die "could not create log dir: $LOG_DIR"
+  JOB_LOG="$LOG_DIR/Job.make-golden.$ROLE.log"
+  kslog_job_header "make-golden-iso.sh" "$KIT_VERSION" "$RUN_ID" "$CMDLINE" >> "$JOB_LOG"
+  [ "$NI" = 1 ] || echo "  -> job log: $JOB_LOG"
+fi
+jrec Info "Mode: $([ "$NI" = 1 ] && echo non-interactive || echo interactive)"
+jrec Info "Role: $ROLE"
+
+# Custom %post / --no-log pass-through to the build agent.
+NOLOGOPT=(); [ -n "$NO_LOG" ] && NOLOGOPT=(--no-log)
+
+# Already-filled block: interactive confirms overwrite; NI just proceeds (its intent).
+if ! grep -qE '<<(SET|GENERATE)_[A-Z_]+>>' "$KS"; then
+  if [ "$NI" = 1 ]; then
+    jrec Info "block already filled — overwriting (non-interactive)"
+  else
+    echo "WARNING: $KSNAME has no placeholders left — it appears already filled."
+    read -rp "Re-running overwrites its credentials / NTP / keys. Continue? [Y/N] (Default behavior is No) " ans || exit 1
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+  fi
+fi
+
 # ---- hostname prefix --------------------------------------------------------
-echo
-echo "Hostname prefix — each appliance becomes <prefix>-<unique-hash> (e.g. ${DEF_PREFIX}-a1b2c3d4)."
-echo "(For true sequential names, assign them post-boot via your IPAM / vSphere customization.)"
-while true; do
-  read -rp "  Hostname prefix [default: $DEF_PREFIX]: " HOSTPREFIX || die "input ended"
-  HOSTPREFIX="${HOSTPREFIX:-$DEF_PREFIX}"
-  [[ "$HOSTPREFIX" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,48}[A-Za-z0-9])?$ ]] && break
-  echo "  ✗ letters/digits/hyphens only, no leading/trailing hyphen, ≤50 chars" >&2
-done
+if [ "$NI" = 1 ]; then
+  HOSTPREFIX="${NI_PREFIX:-$DEF_PREFIX}"
+  [[ "$HOSTPREFIX" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,48}[A-Za-z0-9])?$ ]] \
+    || die "invalid --hostname-prefix '$HOSTPREFIX' (letters/digits/hyphens, no leading/trailing hyphen, ≤50)"
+else
+  echo
+  echo "Hostname prefix — each appliance becomes <prefix>-<unique-hash> (e.g. ${DEF_PREFIX}-a1b2c3d4)."
+  echo "(For true sequential names, assign them post-boot via your IPAM / vSphere customization.)"
+  while true; do
+    read -rp "  Hostname prefix [default: $DEF_PREFIX]: " HOSTPREFIX || die "input ended"
+    HOSTPREFIX="${HOSTPREFIX:-$DEF_PREFIX}"
+    [[ "$HOSTPREFIX" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,48}[A-Za-z0-9])?$ ]] && break
+    echo "  ✗ letters/digits/hyphens only, no leading/trailing hyphen, ≤50 chars" >&2
+  done
+fi
 jrec Info "Hostname prefix: $HOSTPREFIX"
 
-# ---- 1. veeamadmin password + MFA choice ------------------------------------
-echo
-echo "Step 1 — veeamadmin password (15+ chars; upper, lower, digit, special; no dictionary words)"
-prompt_password "veeamadmin" ADMIN_PW
-if [ "$ROLE" = hardened-repo ]; then
-  ADMIN_MFA_ENABLED=true
-  echo "  Hardened repository: MFA will be ENFORCED for veeamadmin (and veeamso)."
+# ---- 1. veeamadmin password + MFA -------------------------------------------
+if [ "$NI" = 1 ]; then
+  [ -n "$ADMIN_PW" ] || die "veeamadmin.password missing on stdin"
+  validate_pw "$ADMIN_PW" "veeamadmin" || die "veeamadmin password fails the appliance policy"
+  if [ "$ROLE" = hardened-repo ]; then ADMIN_MFA_ENABLED=true
+  elif [ "$NI_ADMIN_MFA" = 1 ];  then ADMIN_MFA_ENABLED=true
+  else                                 ADMIN_MFA_ENABLED=false; fi
 else
-  read -rp "  Enforce MFA on the veeamadmin account? [Y/N] (Default behavior is No) " m || die "input ended"
-  [[ "$m" =~ ^[Yy]$ ]] && ADMIN_MFA_ENABLED=true || ADMIN_MFA_ENABLED=false
+  echo
+  echo "Step 1 — veeamadmin password (15+ chars; upper, lower, digit, special; no dictionary words)"
+  prompt_password "veeamadmin" ADMIN_PW
+  if [ "$ROLE" = hardened-repo ]; then
+    ADMIN_MFA_ENABLED=true
+    echo "  Hardened repository: MFA will be ENFORCED for veeamadmin (and veeamso)."
+  else
+    read -rp "  Enforce MFA on the veeamadmin account? [Y/N] (Default behavior is No) " m || die "input ended"
+    [[ "$m" =~ ^[Yy]$ ]] && ADMIN_MFA_ENABLED=true || ADMIN_MFA_ENABLED=false
+  fi
 fi
 jrec Info "veeamadmin.password = $KSLOG_MASK (set)"
 jrec Info "veeamadmin.isMfaEnabled: $ADMIN_MFA_ENABLED"
 
 # ---- 2. veeamso account: enabled? + password --------------------------------
-echo
-read -rp "Step 2 — Enable the veeamso (Security Officer) account? [Y/N] (Default behavior is Yes) " s || die "input ended"
-if [[ "$s" =~ ^[Nn]$ ]]; then SO_ENABLED=false; else SO_ENABLED=true; fi
-if [ "$SO_ENABLED" = true ]; then
-  echo "  veeamso password (same rules; must differ from veeamadmin)"
-  while true; do
-    prompt_password "veeamso" SO_PW
-    [ "$SO_PW" != "$ADMIN_PW" ] && break
-    echo "  ✗ veeamso password must differ from veeamadmin — try again" >&2
-  done
+if [ "$NI" = 1 ]; then
+  if [ "$NI_SO" = 1 ]; then
+    SO_ENABLED=true
+    [ "$SO_PW_GIVEN" = 1 ] || die "veeamso.password missing on stdin (use --no-veeamso to disable the account)"
+    validate_pw "$SO_PW" "veeamso" || die "veeamso password fails the appliance policy"
+    [ "$SO_PW" != "$ADMIN_PW" ] || die "veeamso password must differ from veeamadmin"
+  else
+    SO_ENABLED=false; SO_PW=""
+  fi
 else
-  echo "  veeamso will be DISABLED (veeamso.isEnabled=false); skipping its password."
-  SO_PW=""   # python fills a throwaway compliant value so the answer file stays valid
+  echo
+  read -rp "Step 2 — Enable the veeamso (Security Officer) account? [Y/N] (Default behavior is Yes) " s || die "input ended"
+  if [[ "$s" =~ ^[Nn]$ ]]; then SO_ENABLED=false; else SO_ENABLED=true; fi
+  if [ "$SO_ENABLED" = true ]; then
+    echo "  veeamso password (same rules; must differ from veeamadmin)"
+    while true; do
+      prompt_password "veeamso" SO_PW
+      [ "$SO_PW" != "$ADMIN_PW" ] && break
+      echo "  ✗ veeamso password must differ from veeamadmin — try again" >&2
+    done
+  else
+    echo "  veeamso will be DISABLED (veeamso.isEnabled=false); skipping its password."
+    SO_PW=""   # python fills a throwaway compliant value so the answer file stays valid
+  fi
 fi
 jrec Info "veeamso.isEnabled: $SO_ENABLED"
 [ "$SO_ENABLED" = true ] && jrec Info "veeamso.password = $KSLOG_MASK (set)" || true
 
 # ---- 3. NTP -----------------------------------------------------------------
-echo
-echo "Step 3 — NTP server(s), comma-separated (e.g. ntp1.corp.local,ntp2.corp.local)"
-while true; do
-  read -rp "  NTP server(s): " NTP || die "input ended"
-  [ -n "$NTP" ] && break
-  echo "  ✗ NTP server cannot be empty" >&2
-done
-# Optional: skip the forced NTP time-sync at first boot. For networks where NTP
-# isn't reachable at first boot (e.g. Azure VMware Solution / restricted segments)
-# the blocking sync step fails and the unattended config drops to the manual wizard.
-# The VM still gets time from the hypervisor, so MFA/TOTP keeps working; the NTP
-# server above stays configured (chrony syncs once reachable).
-read -rp "  Skip the NTP time-sync at first boot (for AVS / NTP-unreachable networks)? [Y/N] (Default behavior is No) " ntpoff || die "input ended"
-if [[ "$ntpoff" =~ ^[Yy]$ ]]; then NTP_RUNSYNC=false; else NTP_RUNSYNC=true; fi
+if [ "$NI" = 1 ]; then
+  [ -n "$NI_NTP" ] || die "--ntp is required in non-interactive mode"
+  NTP="$NI_NTP"
+  [ "$NI_SKIPNTP" = 1 ] && NTP_RUNSYNC=false || NTP_RUNSYNC=true
+else
+  echo
+  echo "Step 3 — NTP server(s), comma-separated (e.g. ntp1.corp.local,ntp2.corp.local)"
+  while true; do
+    read -rp "  NTP server(s): " NTP || die "input ended"
+    [ -n "$NTP" ] && break
+    echo "  ✗ NTP server cannot be empty" >&2
+  done
+  # Optional: skip the forced NTP time-sync at first boot. For networks where NTP
+  # isn't reachable at first boot (e.g. Azure VMware Solution / restricted segments)
+  # the blocking sync step fails and the unattended config drops to the manual wizard.
+  read -rp "  Skip the NTP time-sync at first boot (for AVS / NTP-unreachable networks)? [Y/N] (Default behavior is No) " ntpoff || die "input ended"
+  if [[ "$ntpoff" =~ ^[Yy]$ ]]; then NTP_RUNSYNC=false; else NTP_RUNSYNC=true; fi
+fi
 jrec Info "ntp.servers: $NTP"
 jrec Info "ntp.runSync: $NTP_RUNSYNC"
 
 # ---- 4. secret keys: generate, or supply your own ---------------------------
-echo
-ADMIN_MFA=""; SO_MFA=""; TOKEN=""
-read -rp "Step 4 — Supply your own MFA keys / recovery token? [Y/N] (Default behavior is No, auto-generate) " own || die "input ended"
-if [[ "$own" =~ ^[Yy]$ ]]; then
-  prompt_optional "veeamadmin MFA secret — 16-char Base32 (A-Z,2-7)" is_b32 ADMIN_MFA
-  if [ "$SO_ENABLED" = true ]; then
-    prompt_optional "veeamso MFA secret — 16-char Base32 (A-Z,2-7)" is_b32 SO_MFA
-    prompt_optional "veeamso recovery token — GUID (8-4-4-4-12 hex)" is_guid TOKEN
+if [ "$NI" = 1 ]; then
+  if [ "$NI_BYO" = 1 ]; then
+    BYO_KEYS=yes
+    [ -z "$ADMIN_MFA" ] || is_b32 "$ADMIN_MFA" || die "veeamadmin.mfaSecretKey on stdin is not 16-char Base32"
+    if [ "$SO_ENABLED" = true ]; then
+      [ -z "$SO_MFA" ] || is_b32 "$SO_MFA" || die "veeamso.mfaSecretKey on stdin is not 16-char Base32"
+      [ -z "$TOKEN" ]  || is_guid "$TOKEN" || die "veeamso.recoveryToken on stdin is not a GUID (8-4-4-4-12 hex)"
+    fi
+  else
+    BYO_KEYS=no
+    ADMIN_MFA=""; SO_MFA=""; TOKEN=""   # ignore any stdin keys; auto-generate fresh
+  fi
+else
+  echo
+  ADMIN_MFA=""; SO_MFA=""; TOKEN=""; BYO_KEYS=no
+  read -rp "Step 4 — Supply your own MFA keys / recovery token? [Y/N] (Default behavior is No, auto-generate) " own || die "input ended"
+  if [[ "$own" =~ ^[Yy]$ ]]; then
+    BYO_KEYS=yes
+    prompt_optional "veeamadmin MFA secret — 16-char Base32 (A-Z,2-7)" is_b32 ADMIN_MFA
+    if [ "$SO_ENABLED" = true ]; then
+      prompt_optional "veeamso MFA secret — 16-char Base32 (A-Z,2-7)" is_b32 SO_MFA
+      prompt_optional "veeamso recovery token — GUID (8-4-4-4-12 hex)" is_guid TOKEN
+    fi
   fi
 fi
-jrec Info "supply-own-keys: $([[ "$own" =~ ^[Yy]$ ]] && echo yes || echo no)"
+jrec Info "supply-own-keys: $BYO_KEYS"
 
 # ---- 4b. optional custom %post (firewall rules, agents, etc.) ----------------
-echo
-echo "Step 4b — Custom %post (OPTIONAL): a shell snippet inserted into the install's"
-echo "  %post — e.g. firewalld rules (see example-custom-post-firewall.sh), an agent,"
-echo "  an SSH key. Runs at install time (firewalld NOT running → use firewall-offline-cmd)."
-echo "  UNSUPPORTED / at your own risk. NOT for network/domain/password-policy/encryption."
-CUSTOM_POST=""
-while true; do
-  read -rp "  Path to a custom %post file (blank = none): " CUSTOM_POST || die "input ended"
-  [ -z "$CUSTOM_POST" ] && break
-  [ -f "$CUSTOM_POST" ] && break
-  echo "  ✗ file not found: $CUSTOM_POST — try again, or blank for none" >&2
-done
+if [ "$NI" = 1 ]; then
+  CUSTOM_POST="$NI_CPOST"
+  [ -z "$CUSTOM_POST" ] || [ -f "$CUSTOM_POST" ] || die "--custom-post file not found: $CUSTOM_POST"
+else
+  echo
+  echo "Step 4b — Custom %post (OPTIONAL): a shell snippet inserted into the install's"
+  echo "  %post — e.g. firewalld rules (see example-custom-post-firewall.sh), an agent,"
+  echo "  an SSH key. Runs at install time (firewalld NOT running → use firewall-offline-cmd)."
+  echo "  UNSUPPORTED / at your own risk. NOT for network/domain/password-policy/encryption."
+  CUSTOM_POST=""
+  while true; do
+    read -rp "  Path to a custom %post file (blank = none): " CUSTOM_POST || die "input ended"
+    [ -z "$CUSTOM_POST" ] && break
+    [ -f "$CUSTOM_POST" ] && break
+    echo "  ✗ file not found: $CUSTOM_POST — try again, or blank for none" >&2
+  done
+fi
 CPOPT=(); [ -n "$CUSTOM_POST" ] && CPOPT=(--custom-post "$CUSTOM_POST")
 jrec Info "custom %post: ${CUSTOM_POST:-none}"
 
 # ---- 4c. guard: VBR-API call in custom %post while veeamadmin MFA is enabled --
-# Best-effort detection of a VBR REST/cmdlet call in the snippet. Unattended API
-# auth can't clear an MFA challenge, so it would fail at first boot. Caught HERE,
-# before Step 5 generates/writes anything, so declining is a clean stop (no
-# backup, no filled block, no ISO — nothing to clean up).
+# Unattended API auth can't clear an MFA challenge, so it would fail at first boot.
+# Interactive: prompt (default stop). Non-interactive: non-blocking warning (the GUI
+# surfaces it; build-appliance-iso.sh also warns), so a headless build stays scriptable.
 if [ -n "$CUSTOM_POST" ] && [ "$ADMIN_MFA_ENABLED" = true ] \
    && grep -qiE '(/api/v1/|oauth2/token|:9419|Install-VBRLicense|Connect-VBRServer)' "$CUSTOM_POST"; then
-  echo
-  echo "  ⚠️  Your custom %post appears to call the VBR API/cmdlets, but veeamadmin MFA is"
-  echo "      ENABLED. Unattended API auth must clear an MFA challenge, so it will likely FAIL"
-  echo "      at first boot unless the snippet computes the TOTP from the baked-in secret."
-  echo "      Simplest fix: deploy with veeamadmin MFA disabled, then enroll/enable it after."
-  read -rp "  Continue with the build anyway? [Y/N] (Default behavior is No — stop) " go || die "input ended"
-  [[ "$go" =~ ^[Yy]$ ]] || die "stopped before generating secrets or building — nothing was created, nothing to clean up. Re-run with veeamadmin MFA disabled, or adjust the custom %post."
+  if [ "$NI" = 1 ]; then
+    echo "WARNING: custom %post appears to call the VBR API/cmdlets while veeamadmin MFA is ENABLED —" >&2
+    echo "         unattended API auth will likely fail at first boot. Continuing (non-interactive)." >&2
+    jrec Warning "custom %post calls VBR API while veeamadmin MFA enabled (non-blocking in NI mode)"
+  else
+    echo
+    echo "  ⚠️  Your custom %post appears to call the VBR API/cmdlets, but veeamadmin MFA is"
+    echo "      ENABLED. Unattended API auth must clear an MFA challenge, so it will likely FAIL"
+    echo "      at first boot unless the snippet computes the TOTP from the baked-in secret."
+    echo "      Simplest fix: deploy with veeamadmin MFA disabled, then enroll/enable it after."
+    read -rp "  Continue with the build anyway? [Y/N] (Default behavior is No — stop) " go || die "input ended"
+    [[ "$go" =~ ^[Yy]$ ]] || die "stopped before generating secrets or building — nothing was created, nothing to clean up. Re-run with veeamadmin MFA disabled, or adjust the custom %post."
+  fi
 fi
 
 # ---- 5. generate (as needed) + write the kickstart --------------------------
@@ -351,6 +475,8 @@ else
 fi
 
 # Reusable secrets summary — printed LAST (after the build log) so it's easy to find.
+# Suppressed in non-interactive mode (it would travel back over SSH); the secrets
+# FILE below is the only secret output then.
 print_secrets() {
   echo "------------------------------------------------------------"
   echo " GENERATED SECRETS — record/keep these   (role: $ROLE)"
@@ -406,8 +532,8 @@ if [ $PREP_ONLY -eq 1 ]; then
   echo "$KSNAME is prepared (--prep-only set; build skipped)."
   echo "Build later on Linux:  ./build-appliance-iso.sh --role $ROLE --hostname-prefix $HOSTPREFIX ${CUSTOM_POST:+--custom-post $CUSTOM_POST }<source-iso>"
   echo
-  print_secrets
-  echo "Secrets also saved to: $SECRETS_FILE"
+  if [ "$NI" != 1 ]; then print_secrets; fi
+  echo "Secrets saved to: $SECRETS_FILE"
   exit 0
 fi
 
@@ -425,10 +551,12 @@ else
     echo "Using detected source ISO: ${isos[0]}"
     "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "${isos[0]}"
   elif [ ${#isos[@]} -gt 1 ]; then
+    [ "$NI" = 1 ] && die "multiple matching ISOs in $HERE / ../ISO Archive — pass the source ISO path explicitly in non-interactive mode"
     echo "  Multiple matching ISOs detected:"; printf '    %s\n' "${isos[@]}"
     read -rp "  Path to source ISO: " SRC_ISO || die "input ended"
     "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO"
   else
+    [ "$NI" = 1 ] && die "no source ISO found (glob $ISO_GLOB in $HERE / ../ISO Archive) — pass the path explicitly in non-interactive mode"
     read -rp "  Path to source ISO ($ISO_GLOB): " SRC_ISO || die "input ended"
     "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO"
   fi
@@ -439,6 +567,6 @@ echo
 echo "============================================================"
 echo " BUILD COMPLETE — role: $ROLE"
 echo "============================================================"
-print_secrets
-echo "Secrets also saved to: $SECRETS_FILE"
+if [ "$NI" != 1 ]; then print_secrets; fi
+echo "Secrets saved to: $SECRETS_FILE"
 echo "(Sensitive — store securely; delete it and the golden ISO after rollout.)"

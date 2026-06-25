@@ -80,7 +80,11 @@ if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Pa
 # friendly console output is unchanged). It NEVER handles secrets — the build is
 # interactive on Linux — so it cannot leak any. The authoritative job + agent
 # logs are produced on Linux and pulled back after the build.
-$TLog = Join-Path $OutputDir ("Job.make-golden-remote-{0}.log" -f (Get-Date -Format "yyyy-MM-ddTHH-mm-ssZ"))
+# All logs (this transport log + the pulled-back per-run folder) live under
+# $OutputDir\logs\ (the ISO + secrets file stay in $OutputDir root).
+$LogDir = Join-Path $OutputDir 'logs'
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$TLog = Join-Path $LogDir ("Job.make-golden-remote-{0}.log" -f (Get-Date -Format "yyyy-MM-ddTHH-mm-ssZ"))
 function Write-TLog {
     param([string]$Level = 'Info', [Parameter(Mandatory)][string]$Msg)
     $line = "[{0}]    <{1}>    {2,-7}    {3}" -f (Get-Date -Format "dd.MM.yyyy HH:mm:ss.fff"), $PID, $Level, $Msg
@@ -99,7 +103,10 @@ try {
     )
 } catch { }
 
-$sshOpts = @()
+# accept-new: auto-accept a NEW host's key on first connect (so the non-interactive
+# ssh/scp steps never stall on the "Are you sure you want to continue connecting?"
+# prompt), while still REFUSING a CHANGED key (MITM protection after first contact).
+$sshOpts = @('-o', 'StrictHostKeyChecking=accept-new')
 if ($IdentityFile) {
     $sshOpts += @('-i', $IdentityFile)
 }
@@ -122,17 +129,45 @@ function Invoke-Net {
 # ---- create remote working dir ----------------------------------------------
 Write-Host "Connecting to $BuildHost ..."
 Write-TLog -Msg "Connecting to $BuildHost"
-$remote = (& ssh @sshOpts $BuildHost 'mktemp -d' | Select-Object -Last 1)
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($remote)) {
-    throw "Could not open an SSH session / create a remote working dir on $BuildHost (check host, auth, connectivity)."
+$hostOnly = $BuildHost -replace '^.*@', ''
+# Capture stderr too so we can classify a failure. A CHANGED host key (accept-new
+# refuses it) is a hard SECURITY error — possible MITM — and this tool ships
+# credentials, so we abort + LOG it explicitly rather than treat it as generic.
+$connOut = & ssh @sshOpts $BuildHost 'mktemp -d' 2>&1
+if ($LASTEXITCODE -ne 0) {
+    if (($connOut | Out-String) -match 'REMOTE HOST IDENTIFICATION HAS CHANGED') {
+        Write-TLog -Level Error -Msg "SECURITY ABORT — SSH host key for $hostOnly has CHANGED (possible MITM). No build run; NO credentials sent."
+        throw "SECURITY ALERT: the SSH host key for '$hostOnly' has CHANGED since it was first trusted. This is the classic man-in-the-middle signature, and this tool transmits credentials to the build host — so the run is ABORTED and NOTHING was sent. If the host was legitimately rebuilt, verify its new fingerprint OUT-OF-BAND, then clear the stale key:  ssh-keygen -R '$hostOnly'"
+    }
+    Write-TLog -Level Error -Msg "SSH connect to $BuildHost failed (host/key/auth/connectivity)"
+    throw "Could not open an SSH session / create a remote working dir on $BuildHost (check host, key/auth, connectivity).`n$($connOut | Out-String)"
 }
-$remote = $remote.Trim()
+# stdout = the mktemp path (starts with '/'); ignore the first-connect 'Permanently added' notice on stderr.
+$remote = ($connOut | Where-Object { "$_" -match '^/\S' } | Select-Object -Last 1)
+$remote = "$remote".Trim()
+if ([string]::IsNullOrWhiteSpace($remote)) { throw "Could not create a remote working dir on $BuildHost." }
 Write-Host "Remote work dir: $remote"
 Write-TLog -Msg "Remote work dir: $remote"
 
 $success = $false
 $built = $false
+$script:SudoPrefix = ''   # set by the privilege probe below; '' = run as the login user
 try {
+    # ---- detect how the build host can patch efiboot.img --------------------
+    # Loop-mount needs root; mtools/mcopy is ROOTLESS. Pick the least-privileged
+    # path that works, so a non-root login with mtools is supported and we don't
+    # sudo when we needn't.
+    $mode = (& ssh @sshOpts $BuildHost 'if [ "$(id -u)" -eq 0 ]; then echo root; elif command -v mcopy >/dev/null 2>&1; then echo mtools; elif sudo -n true 2>/dev/null; then echo sudo; else echo none; fi' | Select-Object -Last 1)
+    if ($LASTEXITCODE -ne 0) { throw "Could not probe build privileges on $BuildHost (check host/auth)." }
+    switch (("$mode").Trim()) {
+        'root'   { $script:SudoPrefix = '';         $privNote = 'root (loop-mount)' }
+        'mtools' { $script:SudoPrefix = '';         $privNote = 'non-root + mtools (rootless efiboot patch)' }
+        'sudo'   { $script:SudoPrefix = 'sudo -n '; $privNote = 'non-root + passwordless sudo (loop-mount)' }
+        default  { throw "Build host '$BuildHost' can't build the ISO: not root, no passwordless sudo, and no mtools. Install mtools for a rootless build, or grant root / NOPASSWD sudo." }
+    }
+    Write-Host "Build privilege on ${BuildHost}: $privNote"
+    Write-TLog -Msg "Build privilege mode: $privNote"
+
     # ---- upload kit + ISO ---------------------------------------------------
     Write-Host "Uploading kit files ..."
     Write-TLog -Msg ("Uploading kit ({0} files, incl. kslog.sh)" -f $needed.Count)
@@ -150,7 +185,7 @@ try {
 
     # ---- interactive build (you answer the prompts) -------------------------
     $isoName = $iso.Name
-    $buildCmd = "cd '$remote' && chmod +x *.sh && sudo ./make-golden-iso.sh './$isoName'"
+    $buildCmd = "cd '$remote' && chmod +x *.sh && $($script:SudoPrefix)./make-golden-iso.sh './$isoName'"
     Write-Host "`n=== Starting interactive build on $BuildHost — answer the prompts below ===`n"
     Write-TLog -Msg "Invoking interactive build (credentials entered on Linux; not captured here)"
     & ssh -t @sshOpts $BuildHost $buildCmd
@@ -160,7 +195,10 @@ try {
     }
 
     # ---- locate + make readable (one round-trip), then pull -----------------
-    $info = & ssh @sshOpts $BuildHost "cd '$remote' && sudo chown `$(id -un):`$(id -gn) *_UNATTENDED.iso veeam-*-secrets-*.txt 2>/dev/null; ls -1 *_UNATTENDED.iso 2>/dev/null; echo '---SECRETS---'; ls -1 veeam-*-secrets-*.txt 2>/dev/null"
+    # chown only when the build ran via sudo (root-owned outputs); for root or
+    # rootless-mtools the login user already owns them.
+    $chown = if ($script:SudoPrefix) { "$($script:SudoPrefix)chown `$(id -un):`$(id -gn) *_UNATTENDED.iso veeam-*-secrets-*.txt 2>/dev/null; " } else { "" }
+    $info = & ssh @sshOpts $BuildHost "cd '$remote' && ${chown}ls -1 *_UNATTENDED.iso 2>/dev/null; echo '---SECRETS---'; ls -1 veeam-*-secrets-*.txt 2>/dev/null"
     $sep = [array]::IndexOf($info, '---SECRETS---')
     $isoOut = if ($sep -ge 1) { ($info[0..($sep - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
     $secOut = if ($sep -ge 0 -and $sep -lt ($info.Count - 1)) { ($info[($sep + 1)..($info.Count - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
@@ -183,12 +221,16 @@ try {
         Write-TLog -Msg "Downloaded secrets file: $secOut (SENSITIVE — contents not logged)"
     }
 
-    # Pull the Linux job + agent logs back (non-secret: job log is masked, agent log
-    # is secret-free). Best-effort, single attempt — never fail the run over logs.
+    # Pull the Linux job + agent logs back (non-secret). Pull the uniquely-named
+    # per-run folder INTO $OutputDir\logs\ for deterministic placement across scp
+    # versions. Best-effort — never fail the run over logs.
     Write-Host "Downloading build logs (job + agent) ..."
-    & scp -r @sshOpts "${BuildHost}:${remote}/logs" $OutputDir 2>$null
-    if ($LASTEXITCODE -eq 0) { Write-TLog -Msg "Downloaded build logs to $OutputDir\logs" }
-    else { Write-TLog -Level Warning -Msg "Build logs not pulled (none present or transfer failed)" }
+    $rf = "$(& ssh @sshOpts $BuildHost "ls -1 '$remote/logs' 2>/dev/null | head -1")".Trim()
+    if ($rf) {
+        & scp -r @sshOpts "${BuildHost}:${remote}/logs/$rf" "$LogDir" 2>$null
+        if ($LASTEXITCODE -eq 0) { Write-Host "Build logs saved to $LogDir\$rf"; Write-TLog -Msg "Downloaded build logs to $LogDir\$rf" }
+        else { Write-TLog -Level Warning -Msg "Build logs not pulled (transfer failed)" }
+    } else { Write-TLog -Level Warning -Msg "Build logs not pulled (none present on remote)" }
 
     $success = $true
     $outResolved = (Resolve-Path $OutputDir).Path
@@ -204,7 +246,7 @@ finally {
     $optStr = ($sshOpts -join ' ')
     if ($success -and -not $KeepRemote) {
         Write-Host "Cleaning up remote build host (removing the kit, ISOs, and secrets) ..."
-        & ssh @sshOpts $BuildHost "sudo rm -rf '$remote'" 2>$null
+        & ssh @sshOpts $BuildHost "$($script:SudoPrefix)rm -rf '$remote'" 2>$null
         Write-TLog -Msg "Cleaned up remote workdir $remote"
     }
     elseif ($KeepRemote) {

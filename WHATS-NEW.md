@@ -3,6 +3,15 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-25 (v2.0.0)
+- Added a **single-window graphical builder for Windows** — double-click **`Launch-GUI.cmd`** and fill in one form (Linux build host + SSH key, ISO type/role, source ISO, hostname prefix, NTP, and the veeamadmin / veeamso passwords), then click **Build ISO**. No command line, no install. The form drives the very same remote build the command-line helper uses (upload kit + ISO to a Linux host, build there, pull the ISO + logs back, clean up).
+  - **Passwords stay protected.** They're held as a SecureString and sent to the build host **only over the encrypted SSH channel via stdin** — never on a command line, environment variable, or shell history — and the cleartext is cleared from memory right after. The remote build files are deleted when the run finishes.
+  - **Bad passwords are caught before the build, not after.** The form checks each password against the appliance's policy as you type (15+ chars; upper/lower/digit/special; no long same-class or repeated-character runs; veeamadmin must differ from veeamso) and keeps **Build** disabled until both pass — so you don't wait several minutes only to have the appliance reject a weak password at first boot.
+  - **Sensible rules built in:** choosing the **Hardened Repository** role locks MFA on for both accounts (as the kit has always done); turning the Security Officer account off greys its fields; and an **Advanced** section keeps power-user options (post-install %post script, bring-your-own MFA keys / recovery token, skip-NTP-sync, keep-remote-on-failure) out of the way for the common case.
+  - **First-connection safety:** the first time you build against a host, the form shows that host's SSH fingerprint and makes you **verify it** — either paste the expected SHA256, or type the word `ACCEPT` — before any credentials are sent (Reject is the default; a changed key is refused outright as a possible man-in-the-middle).
+  - **Live progress:** the build runs in the background so the window never freezes, the steps stream into a log pane, and you get a clear success/failure result plus a pointer to where the ISO and logs were saved.
+- The command-line remote helper (`make-golden-remote.ps1`) is unchanged and still available for scripted/CLI use; the GUI is an addition, not a replacement.
+
 ## New changes — 2026-06-22 (v1.3.0)
 - Added **build logging** so every run leaves a record to diagnose a failed build (or a later install) from:
   - The guided builder writes a **job log** of the run, and the build step writes its own **agent log**; the two share a run id and are grouped in one per-run folder under `logs/`. `generate-secrets.sh` and `check-credentials.sh` also log when run on their own.
