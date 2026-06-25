@@ -26,6 +26,9 @@ logs/
 *.filled
 secrets.env
 *.secret
+# The per-build secrets sheet (cleartext creds + MFA keys). The GUI/remote builders
+# default their output to the kit folder, so guard against ever committing one.
+veeam-*-secrets-*.txt
 
 # ── Built images ─────────────────────────────────────────────────────────
 *.iso
