@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-25 (v2.0.1)
+- Fixed the **`Launch-GUI.cmd`** double-click launcher not starting on Windows: the file had macOS-style line endings (and a non-ASCII dash) that `cmd.exe` mis-parses. Rewrote it as plain ASCII, added a pause so any launch error stays readable instead of the window vanishing, and added a `.gitattributes` so batch files are always checked out with Windows (CRLF) line endings while the Linux build scripts stay LF. The GUI itself was unaffected — this was only the double-click convenience wrapper (you can always run `make-golden-gui.ps1 -Gui` directly).
+
 ## New changes — 2026-06-25 (v2.0.0)
 - Added a **single-window graphical builder for Windows** — double-click **`Launch-GUI.cmd`** and fill in one form (Linux build host + SSH key, ISO type/role, source ISO, hostname prefix, NTP, and the veeamadmin / veeamso passwords), then click **Build ISO**. No command line, no install. The form drives the very same remote build the command-line helper uses (upload kit + ISO to a Linux host, build there, pull the ISO + logs back, clean up).
   - **Passwords stay protected.** They're held as a SecureString and sent to the build host **only over the encrypted SSH channel via stdin** — never on a command line, environment variable, or shell history — and the cleartext is cleared from memory right after. The remote build files are deleted when the run finishes.

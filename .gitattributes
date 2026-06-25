@@ -1,0 +1,16 @@
+# Deterministic line endings regardless of the OS a contributor authors on.
+# Without this, a file authored on macOS/Linux (LF) breaks cmd.exe, and a Windows
+# checkout could CRLF-corrupt the build scripts that must run on Linux.
+
+# Windows batch/cmd MUST be CRLF or cmd.exe mis-parses them ("a series of errors").
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# These run on Linux and MUST stay LF.
+*.sh    text eol=lf
+*.tmpl  text eol=lf
+*.cfg   text eol=lf
+
+# Binary: never normalize.
+*.iso   binary
+*.png   binary
