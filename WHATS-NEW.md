@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-26 (v2.0.8)
+- **Important fix (Windows GUI builds).** When building from the GUI, the secret values sent to the Linux build host could pick up a trailing carriage return (a Windows line-ending artifact), corrupting them. It showed up as a valid **bring-your-own MFA key** being rejected as *"not 16-char Base32"* — but it also silently affected **passwords**: an ISO built by the GUI could end up with an invisible extra character on a baked password, which would make **first-boot login fail** (the build still "succeeded", so it wasn't obvious). The build host now strips carriage returns from the secret values, so passwords and BYO keys are applied exactly as entered. **If you built any ISOs with the GUI on v2.0.0–v2.0.7, rebuild them with this version before deploying.** (The command-line `make-golden-remote.ps1` path was never affected — it enters credentials directly on Linux.)
+
 ## New changes — 2026-06-26 (v2.0.7)
 - The GUI window no longer runs past the bottom of the screen when **Advanced** is expanded. It's now capped to the screen's working area and **scrolls** when the content is taller, so it stays usable on smaller or non-full-screen RDP sessions (not just full-screen 1080p). If it would still run off the bottom, it nudges itself up to stay on-screen.
 

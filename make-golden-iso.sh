@@ -168,6 +168,10 @@ ADMIN_PW=""; SO_PW=""; ADMIN_MFA=""; SO_MFA=""; TOKEN=""; SO_PW_GIVEN=0
 if [ "$NI" = 1 ]; then
   [ -t 0 ] && die "--non-interactive requires the secret key=value blob on stdin"
   while IFS= read -r line || [ -n "$line" ]; do
+    line="${line//$'\r'/}"   # strip CR: a Windows/PowerShell client pipes the blob with CRLF,
+                             # and a trailing \r would corrupt the value (BYO key fails the strict
+                             # Base32 check; a password silently gets an invisible trailing char
+                             # that breaks first-boot login). No legit secret value contains CR.
     case "$line" in ''|'#'*) continue ;; esac
     k="${line%%=*}"; v="${line#*=}"
     case "$k" in
