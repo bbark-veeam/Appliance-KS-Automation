@@ -664,7 +664,7 @@ $chkAdvanced = New-Object System.Windows.Forms.CheckBox; $chkAdvanced.SetBounds(
 
 # Advanced group (collapsed by default; toggling shifts everything below it)
 $grpAdv = New-Object System.Windows.Forms.GroupBox
-$grpAdv.SetBounds($LX, $y, 668, 196); $grpAdv.Text = "Advanced"; $grpAdv.Visible = $false
+$grpAdv.SetBounds($LX, $y, 668, 230); $grpAdv.Text = "Advanced"; $grpAdv.Visible = $false   # tall enough for all rows incl. the recovery-token field (was 196 -> clipped + overlapped Build)
 $form.Controls.Add($grpAdv)
 $ay = 22
 $chkSkipNtp = New-Object System.Windows.Forms.CheckBox; $chkSkipNtp.SetBounds(12, $ay, 620, 22); $chkSkipNtp.Text = "Skip NTP time-sync at first boot (--skip-ntp-sync)"; $grpAdv.Controls.Add($chkSkipNtp); $ay += 26
@@ -690,6 +690,10 @@ $txtLog = New-Object System.Windows.Forms.TextBox; $txtLog.SetBounds($LX, 44, 66
 $advCollapsedTop = $y          # where the bottom panel sits when Advanced is hidden
 $advExpandedTop = $y + 8 + $grpAdv.Height
 $pnlBottom.Top = $advCollapsedTop
+# Size the form to exactly fit the bottom panel: compact when Advanced is collapsed,
+# grown when it opens (the toggle handler re-sizes it). Keeps the Build panel clear of
+# the Advanced fields and avoids dead space below.
+$form.ClientSize = New-Object System.Drawing.Size(700, ($pnlBottom.Top + $pnlBottom.Height + 12))
 
 # ---- field-rule helpers -----------------------------------------------------
 function Update-FormRules {
@@ -751,6 +755,7 @@ $btnOut.Add_Click({
 $chkAdvanced.Add_CheckedChanged({
     $grpAdv.Visible = $chkAdvanced.Checked
     $pnlBottom.Top = if ($chkAdvanced.Checked) { $advExpandedTop } else { $advCollapsedTop }
+    $form.ClientSize = New-Object System.Drawing.Size(700, ($pnlBottom.Top + $pnlBottom.Height + 12))
 })
 $chkByo.Add_CheckedChanged({
     $txtAdminKey.Enabled = $chkByo.Checked

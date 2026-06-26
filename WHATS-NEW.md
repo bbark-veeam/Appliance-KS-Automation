@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-26 (v2.0.6)
+- Fixed a layout bug in the GUI's **Advanced** section: the bottom field (**veeamso recovery token**) was clipped and overlapped the **Build ISO** button. The Advanced panel is now sized to fit all its fields, and the window grows/shrinks as you open or close Advanced — so nothing overlaps and there's no dead space.
+
 ## New changes — 2026-06-25 (v2.0.5)
 - Added **Confirm password** fields for both veeamadmin and veeamso in the GUI. Because the password boxes are masked, a typo would otherwise only surface when the appliance rejected it after a multi-minute build; the form now checks the two entries match (live) and keeps **Build** disabled until they do — alongside the existing policy and "must differ from veeamadmin" checks.
 
