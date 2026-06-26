@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-26 (v2.0.9)
+- Tightened the GUI's SSH host-key handling. A **changed host key** (possible man-in-the-middle) is reliably caught and the build is **refused before anything is sent**, and the GUI now shows it as a clear **"SSH host key CHANGED - refused"** dialog instead of a raw error line. (Previously the GUI's pre-flight check could wave a build through when only *one* of the host's key types had changed — the build host's SSH still refused it safely, but the message was buried; the pre-flight now defers changed-key detection to SSH, which checks it correctly per key type.) First-time host trust is unchanged: you still see the fingerprint and must type-to-confirm before any credentials are sent.
+
 ## New changes — 2026-06-26 (v2.0.8)
 - **Important fix (Windows GUI builds).** When building from the GUI, the secret values sent to the Linux build host could pick up a trailing carriage return (a Windows line-ending artifact), corrupting them. It showed up as a valid **bring-your-own MFA key** being rejected as *"not 16-char Base32"* — but it also silently affected **passwords**: an ISO built by the GUI could end up with an invisible extra character on a baked password, which would make **first-boot login fail** (the build still "succeeded", so it wasn't obvious). The build host now strips carriage returns from the secret values, so passwords and BYO keys are applied exactly as entered. **If you built any ISOs with the GUI on v2.0.0–v2.0.7, rebuild them with this version before deploying.** (The command-line `make-golden-remote.ps1` path was never affected — it enters credentials directly on Linux.)
 

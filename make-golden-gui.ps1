@@ -543,12 +543,25 @@ and confirm the SHA256 matches. Do NOT trust a key you cannot verify.
 }
 
 # Verify the host key before the transport connects. Returns $true to proceed.
-#   * already known + matches  -> proceed silently
-#   * known but CHANGED        -> hard refuse (no accept path; MITM signature)
-#   * unknown                  -> type-to-confirm dialog; on Accept, append to known_hosts
+#   * already known -> proceed; the build's ssh is the AUTHORITY on a CHANGED key. ssh does
+#                      correct PER-KEY-TYPE detection and the transport hard-aborts on a
+#                      changed key before any credential is sent. We do NOT re-implement that
+#                      here - the old "any scanned fingerprint matches any stored one" check
+#                      was too lenient: ssh-keyscan returns rsa+ecdsa+ed25519, so if only one
+#                      type's stored key changed, the others still matched and it wrongly
+#                      proceeded (the changed key was then caught downstream by ssh anyway).
+#   * unknown       -> type-to-confirm dialog; on Accept, append to known_hosts.
 function Confirm-HostKey {
     param([string]$HostOnly)
     $ErrorActionPreference = 'Continue'   # ssh-keyscan/ssh-keygen banners go to stderr; under PS 5.1 + Stop that throws
+
+    # Known already? Proceed - let the transport's ssh validate the key. A CHANGED key is
+    # caught there (REMOTE HOST IDENTIFICATION HAS CHANGED) and the run is aborted before
+    # anything is sent; the GUI surfaces that as a clear refusal dialog.
+    $known = & ssh-keygen -F $HostOnly 2>$null | Where-Object { $_ -and $_ -notmatch '^#' }
+    if ($known) { return $true }
+
+    # Unknown host -> retrieve the key and require explicit type-to-confirm trust.
     $scan = & ssh-keyscan -T 8 $HostOnly 2>$null | Where-Object { $_ -and $_ -notmatch '^#' }
     if (-not $scan) {
         [System.Windows.Forms.MessageBox]::Show(
@@ -556,30 +569,16 @@ function Confirm-HostKey {
             "Host key unavailable", 'OK', 'Error') | Out-Null
         return $false
     }
-    $scanFprs = @($scan | ForEach-Object { Get-Sha256Fingerprint $_ } | Where-Object { $_ })
-
-    $known = & ssh-keygen -F $HostOnly 2>$null | Where-Object { $_ -and $_ -notmatch '^#' }
-    if ($known) {
-        $knownFprs = @($known | ForEach-Object { Get-Sha256Fingerprint $_ } | Where-Object { $_ })
-        $match = $scanFprs | Where-Object { $knownFprs -contains $_ }
-        if ($match) { return $true }   # known + matches -> proceed
-        # known but the live key does NOT match any stored key = CHANGED. Hard refuse.
-        [System.Windows.Forms.MessageBox]::Show(
-            "SECURITY ALERT: the SSH host key for '$HostOnly' has CHANGED since it was first trusted.`n`nThis is the classic man-in-the-middle signature, and this tool transmits credentials. The build is REFUSED - there is no accept path.`n`nIf the host was legitimately rebuilt, verify its new fingerprint OUT-OF-BAND, then clear the stale key from a terminal:`n   ssh-keygen -R $HostOnly",
-            "SSH host key CHANGED - refused", 'OK', 'Error') | Out-Null
-        return $false
-    }
-
-    # unknown -> present the strongest key (prefer ed25519) for type-to-confirm
+    # present the strongest key (prefer ed25519) for type-to-confirm
     $line = ($scan | Where-Object { $_ -match ' ssh-ed25519 ' } | Select-Object -First 1)
     if (-not $line) { $line = $scan | Select-Object -First 1 }
     $fpr = Get-Sha256Fingerprint $line
     $ktype = if ($line -match '\s(ssh-\S+|ecdsa-\S+)\s') { $Matches[1] } else { 'unknown' }
     if (-not (Show-HostKeyDialog -HostLabel $HostOnly -Fingerprint $fpr -KeyType $ktype)) { return $false }
 
-    # accepted -> append ALL scanned keys for this host to the user's known_hosts so
-    # the subsequent transport connects against a now-known key (accept-new is a no-op,
-    # a later CHANGE is still refused).
+    # accepted -> append ALL scanned keys for this host to the user's known_hosts so the
+    # subsequent transport connects against a now-known key (a later CHANGE is still refused
+    # by ssh / the transport).
     $sshDir = Join-Path $env:USERPROFILE '.ssh'
     if (-not (Test-Path -LiteralPath $sshDir)) { New-Item -ItemType Directory -Path $sshDir | Out-Null }
     $kh = Join-Path $sshDir 'known_hosts'
@@ -823,10 +822,20 @@ $timer.Add_Tick({
         $script:ps.Dispose(); $script:ps = $null
         $script:Building = $false
         if ($failed) {
-            $lblStatus.Text = "Build FAILED - see the log below."
+            # A CHANGED host key is caught by the transport (ssh) and thrown as a SECURITY
+            # ALERT; pull the clean alert text out of the EndInvoke wrapper and surface it as
+            # its own refusal dialog rather than burying it as a raw exception line.
+            $isHostKeyChange = ($emsg -match 'SECURITY ALERT' -and $emsg -match 'CHANGED')
+            if ($isHostKeyChange -and $emsg -match 'SECURITY ALERT:') {
+                $emsg = ($emsg -replace '^.*?(SECURITY ALERT:)', '$1').Trim().TrimEnd('"').Trim()
+            }
+            $lblStatus.Text = if ($isHostKeyChange) { "SSH host key CHANGED - build refused (possible MITM)." } else { "Build FAILED - see the log below." }
             $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
             Add-LogLine "==== BUILD FAILED ===="
             if ($emsg) { Add-LogLine $emsg }
+            if ($isHostKeyChange) {
+                [System.Windows.Forms.MessageBox]::Show($emsg, "SSH host key CHANGED - refused", 'OK', 'Error') | Out-Null
+            }
         } else {
             $lblStatus.Text = "Build complete. ISO + logs saved to the output folder."
             $lblStatus.ForeColor = [System.Drawing.Color]::ForestGreen
