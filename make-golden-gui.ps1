@@ -59,6 +59,8 @@ param(
     [switch]$KeepRemote,
     [switch]$KeepOnFailure,   # GUI "Keep on failure" (Advanced): on failure, KEEP the remote workdir
                               # (so a built-but-undownloaded ISO isn't lost) instead of the default rm -rf
+    [ValidateSet('SSH', 'WSL')][string]$BuildBackend = 'SSH',   # SSH = remote Linux over SSH (default); WSL = local WSL2
+    [string]$WslDistro,       # WSL backend only: distro name (blank = WSL default distro)
     [switch]$Gui   # launch the WinForms single-window form (collects the above, then runs the transport)
 )
 $ErrorActionPreference = 'Stop'
@@ -94,7 +96,9 @@ $TransportScript = {
         [switch]$PrepOnly,
         [switch]$KeepRemote,
         [switch]$KeepOnFailure,
-        [string]$KitRoot
+        [string]$KitRoot,
+        [ValidateSet('SSH', 'WSL')][string]$BuildBackend = 'SSH',   # SSH = remote Linux (default); WSL = local WSL2
+        [string]$WslDistro                                          # WSL backend: distro name; blank = WSL default distro
     )
     # Native ssh/scp write progress + banners to stderr; under Windows PowerShell 5.1,
     # $ErrorActionPreference='Stop' turns ANY native stderr into a TERMINATING error
@@ -118,6 +122,30 @@ $TransportScript = {
     # (The GUI also format-validates these before Build; this is the defense-in-depth
     # layer that holds even if a value reaches the transport unchecked.)
     function ConvertTo-ShSq { param([string]$s) "'" + ($s -replace "'", "'\''") + "'" }
+
+    # Assemble the plaintext key=value secrets blob fed to the build over stdin (NOT argv).
+    # Single source for both backends (SSH + WSL); caller scrubs the result ASAP. The build
+    # host strips any trailing CR, so a Windows CRLF on the pipe can't corrupt a value.
+    function New-SecretBlob {
+        $lines = @("veeamadmin.password=" + (ConvertFrom-SecureToPlain $VeeamAdminPassword))
+        if (-not $NoVeeamso) { $lines += "veeamso.password=" + (ConvertFrom-SecureToPlain $VeeamsoPassword) }
+        if ($ByoKeys) {
+            if ($VeeamAdminMfaKey)                          { $lines += "veeamadmin.mfaSecretKey=$VeeamAdminMfaKey" }
+            if (-not $NoVeeamso -and $VeeamsoMfaKey)         { $lines += "veeamso.mfaSecretKey=$VeeamsoMfaKey" }
+            if (-not $NoVeeamso -and $VeeamsoRecoveryToken)  { $lines += "veeamso.recoveryToken=$VeeamsoRecoveryToken" }
+        }
+        ($lines -join "`n")
+    }
+
+    # Translate a Windows path to its WSL /mnt path in-process (avoids quoting a backslash
+    # path through wsl.exe + a subprocess per file). C:\Users\x -> /mnt/c/Users/x.
+    function ConvertTo-WslPath {
+        param([string]$WinPath)
+        $full = $WinPath
+        try { $rp = (Resolve-Path -LiteralPath $WinPath -ErrorAction Stop).Path; if ($rp) { $full = $rp } } catch { }
+        if ($full -match '^([A-Za-z]):[\\/](.*)$') { '/mnt/' + $Matches[1].ToLower() + '/' + ($Matches[2] -replace '\\', '/') }
+        else { $full -replace '\\', '/' }
+    }
 
     # Lock a pulled-back artifact down to the current Windows user - the built ISO and
     # the secrets file both carry CLEARTEXT credentials, so on a shared/multi-user box
@@ -193,13 +221,21 @@ $TransportScript = {
     }
 
     # ---- preflight ----------------------------------------------------------
-    foreach ($t in 'ssh', 'scp') {
-        if (-not (Get-Command $t -ErrorAction SilentlyContinue)) {
-            throw "$t not found. Install the Windows OpenSSH client:  Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"
-        }
-    }
-    foreach ($req in 'BuildHost', 'IsoPath', 'Role', 'Ntp') {
+    foreach ($req in 'IsoPath', 'Role', 'Ntp') {
         if ([string]::IsNullOrWhiteSpace((Get-Variable $req -ValueOnly))) { throw "Missing required parameter: -$req" }
+    }
+    if ($BuildBackend -eq 'SSH') {
+        foreach ($t in 'ssh', 'scp') {
+            if (-not (Get-Command $t -ErrorAction SilentlyContinue)) {
+                throw "$t not found. Install the Windows OpenSSH client:  Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($BuildHost)) { throw "Missing required parameter: -BuildHost (SSH backend)" }
+    } else {
+        # WSL2 local backend: wsl.exe must be present (WSL2 installed + a distro).
+        if (-not (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) {
+            throw "wsl.exe not found - WSL2 is not installed/enabled. Run 'wsl --install', or use the Remote (SSH) backend."
+        }
     }
     if (-not $VeeamAdminPassword) { throw "Missing required -VeeamAdminPassword (SecureString)" }
     if (-not $NoVeeamso -and -not $VeeamsoPassword) { throw "Missing -VeeamsoPassword (SecureString) - or pass -NoVeeamso to disable the account" }
@@ -220,8 +256,10 @@ $TransportScript = {
     # additionally presents an explicit type-to-confirm dialog BEFORE this runs, so the
     # key is normally already in known_hosts by the time the transport connects.
     $sshOpts = @('-o', 'StrictHostKeyChecking=accept-new')
-    if ($IdentityFile) { $sshOpts += @('-i', $IdentityFile) }
-    else { Write-Warning "No -IdentityFile: with password auth you'll be prompted on EVERY step (and the build's stdin secret feed can break). Use SSH key auth." }
+    if ($BuildBackend -eq 'SSH') {
+        if ($IdentityFile) { $sshOpts += @('-i', $IdentityFile) }
+        else { Write-Warning "No -IdentityFile: with password auth you'll be prompted on EVERY step (and the build's stdin secret feed can break). Use SSH key auth." }
+    }
 
     # All logs (this transport log + the pulled-back per-run folder) live under
     # $OutputDir\logs\ so they land in ONE predictable place; the ISO + secrets file
@@ -237,7 +275,7 @@ $TransportScript = {
             "Tool: [Veeam Appliance Kickstart - COMMUNITY TOOL, NOT an official Veeam product]"
             "Report issues: [https://github.com/bbark-veeam/Appliance-KS-Automation/issues]"
             ("Module: [make-golden-gui.ps1] (Windows non-interactive transport). PID: [{0}], Host: [{1}]" -f $PID, $env:COMPUTERNAME)
-            ("CmdLineParams: [BuildHost={0}; Role={1}; IsoPath={2}; OutputDir={3}; PrepOnly={4}]" -f $BuildHost, $Role, $iso.Name, $OutputDir, [bool]$PrepOnly)
+            ("CmdLineParams: [Backend={0}; Target={1}; Role={2}; IsoPath={3}; OutputDir={4}; PrepOnly={5}]" -f $BuildBackend, $(if ($BuildBackend -eq 'WSL') { if ($WslDistro) { "wsl:$WslDistro" } else { 'wsl:(default)' } } else { $BuildHost }), $Role, $iso.Name, $OutputDir, [bool]$PrepOnly)
             ""
         )
     } catch { }
@@ -254,6 +292,140 @@ $TransportScript = {
     if ($ByoKeys)        { $mgFlags += " --byo-keys" }
     if ($CustomPost)     { $mgFlags += " --custom-post $(ConvertTo-ShSq ('./' + (Split-Path -Leaf $CustomPost)))" }
     if ($PrepOnly)       { $mgFlags += " --prep-only" }
+
+    # ---- shared pre-copy check: does the ISO contain the selected role's kickstart? ----
+    # Catch a role/ISO mismatch (e.g. role 'vbem' on a VIA ISO) BEFORE copying a multi-GB
+    # ISO only to fail at extraction. Windows-side via Mount-DiskImage; best-effort - if
+    # mounting is policy-blocked we warn and let the build's own extract be the backstop.
+    # Each role's stock kickstart lives at the ISO ROOT.
+    $roleKs = @{ 'proxy' = 'proxy-ks.cfg'; 'vmware-proxy' = 'vmware-proxy-ks.cfg'; 'hardened-repo' = 'hardened-repo-ks.cfg'; 'vsa' = 'vbr-ks.cfg'; 'vbem' = 'vbem-ks.cfg' }[$Role]
+    if ($roleKs) {
+        $isoHasKs = $null
+        try {
+            $di  = Mount-DiskImage -ImagePath $iso.FullName -PassThru -ErrorAction Stop
+            $drv = ($di | Get-Volume).DriveLetter
+            if ($drv) { $isoHasKs = Test-Path -LiteralPath ("{0}:\{1}" -f $drv, $roleKs) }
+        } catch {
+            Write-Warning "Could not mount the ISO to pre-verify the role kickstart ($($_.Exception.Message)); proceeding - the build will verify."
+        } finally {
+            Dismount-DiskImage -ImagePath $iso.FullName -ErrorAction SilentlyContinue | Out-Null
+        }
+        if ($isoHasKs -eq $false) {
+            Write-TLog -Level Error -Msg "Pre-check FAILED: ISO has no /$roleKs for role $Role"
+            throw "The selected ISO has no '/$roleKs' at its root, so it can't build the '$Role' role. Wrong ISO? proxy/vmware-proxy/hardened-repo need the VeeamInfrastructureAppliance ISO; vsa/vbem need the VeeamSoftwareAppliance ISO."
+        }
+        if ($isoHasKs) { Write-TLog -Msg "Pre-check OK: ISO contains /$roleKs (role $Role)" }
+    }
+
+    # =========================================================================
+    #  WSL2 LOCAL BACKEND - build in WSL2 on this machine as root (no SSH).
+    #  Mirrors the SSH flow with wsl.exe + cp instead of ssh + scp; reuses the
+    #  same non-interactive make-golden engine + stdin secrets (+ build-host CR
+    #  strip) + Protect-LocalFile + logging.
+    # =========================================================================
+    if ($BuildBackend -eq 'WSL') {
+        $env:WSL_UTF8 = '1'   # force UTF-8 from wsl.exe so captured output parses (no UTF-16/nulls)
+        $dd = @(); if ($WslDistro) { $dd = @('-d', $WslDistro) }
+        $wslLabel = if ($WslDistro) { $WslDistro } else { '(default distro)' }
+        Write-Host "Building locally in WSL2: $wslLabel"
+        Write-TLog -Msg "WSL backend: distro=$wslLabel"
+
+        $xchk = (& wsl.exe @dd -u root -- bash -lc 'command -v xorriso >/dev/null 2>&1 && echo OK || echo NO' 2>&1 | Select-Object -Last 1)
+        if (("$xchk").Trim() -ne 'OK') {
+            throw "xorriso is not installed in WSL distro '$wslLabel'. Install it there (sudo apt install -y xorriso  /  sudo dnf install -y xorriso) and retry."
+        }
+
+        $remote = (& wsl.exe @dd -u root -- mktemp -d 2>&1 | Where-Object { "$_" -match '^/\S' } | Select-Object -Last 1)
+        $remote = "$remote".Trim()
+        if ([string]::IsNullOrWhiteSpace($remote)) { throw "Could not create a WSL work dir (mktemp -d failed)." }
+        Write-Host "WSL work dir: $remote"
+        Write-TLog -Msg "WSL work dir: $remote"
+
+        $success = $false; $built = $false
+        try {
+            Write-TLog -Msg ("Copying kit ({0} files) + ISO into WSL" -f $needed.Count)
+            foreach ($f in $needed) {
+                $src = ConvertTo-WslPath (Join-Path $kit $f)
+                & wsl.exe @dd -u root -- cp "$src" "$remote/"
+                if ($LASTEXITCODE -ne 0) { throw "Failed to copy kit file '$f' into WSL." }
+            }
+            if ($CustomPost) {
+                $cpSrc = ConvertTo-WslPath $CustomPost
+                & wsl.exe @dd -u root -- cp "$cpSrc" "$remote/"
+                if ($LASTEXITCODE -ne 0) { throw "Failed to copy the custom-post file into WSL." }
+            }
+            $wslIso = ConvertTo-WslPath $iso.FullName
+            Write-Host ("Copying ISO ({0:N2} GB) into WSL ..." -f ($iso.Length / 1GB))
+            Write-TLog -Msg ("Copying source ISO {0} into WSL" -f $iso.Name)
+            & wsl.exe @dd -u root -- cp "$wslIso" "$remote/"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to copy the ISO into WSL." }
+
+            $blob = New-SecretBlob
+            $isoName = $iso.Name
+            $buildCmd = "cd $(ConvertTo-ShSq $remote) && chmod +x *.sh && ./make-golden-iso.sh $mgFlags $(ConvertTo-ShSq ('./' + $isoName))"
+            Write-Host "`nBuilding in WSL ($wslLabel), non-interactive ..."
+            Write-TLog -Msg "Invoking non-interactive build in WSL (secrets via stdin; not captured here)"
+            $blob | & wsl.exe @dd -u root -- bash -c $buildCmd
+            $buildRc = $LASTEXITCODE
+            $blob = $null; [System.GC]::Collect()
+            if ($buildRc -ne 0) { Write-TLog -Level Error -Msg "WSL build failed (exit $buildRc)"; throw "WSL build failed (exit $buildRc). Work dir kept for inspection (see below)." }
+
+            if ($PrepOnly) {
+                $success = $true
+                Write-TLog -Msg "prep-only build complete (no ISO produced)"
+                Write-Host "Prep-only complete in WSL (no ISO). Logs will be copied back."
+            } else {
+                $info = & wsl.exe @dd -u root -- bash -c "cd $(ConvertTo-ShSq $remote) && ls -1 *_UNATTENDED.iso 2>/dev/null; echo '---SECRETS---'; ls -1 veeam-*-secrets-*.txt 2>/dev/null"
+                $sep = [array]::IndexOf($info, '---SECRETS---')
+                $isoOut = if ($sep -ge 1) { ($info[0..($sep - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
+                $secOut = if ($sep -ge 0 -and $sep -lt ($info.Count - 1)) { ($info[($sep + 1)..($info.Count - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
+                if ([string]::IsNullOrWhiteSpace($isoOut)) { throw "No built ISO (*_UNATTENDED.iso) in the WSL work dir - the build may not have completed." }
+                $built = $true; $isoOut = "$isoOut".Trim()
+                Write-TLog -Msg "Built ISO: $isoOut"
+                $wslOut = ConvertTo-WslPath ((Resolve-Path $OutputDir).Path)
+                Write-Host "`nCopying built ISO back ..."
+                & wsl.exe @dd -u root -- cp "$remote/$isoOut" "$wslOut/"
+                if ($LASTEXITCODE -ne 0) { Write-TLog -Level Error -Msg "Built-ISO copy-back failed"; throw "Copy-back of the built ISO failed." }
+                Write-TLog -Msg "Copied built ISO to $OutputDir"
+                Protect-LocalFile (Join-Path $OutputDir $isoOut)
+                if (-not [string]::IsNullOrWhiteSpace($secOut)) {
+                    $secOut = "$secOut".Trim()
+                    & wsl.exe @dd -u root -- cp "$remote/$secOut" "$wslOut/"
+                    Protect-LocalFile (Join-Path $OutputDir $secOut)
+                    Write-TLog -Msg "Copied secrets file: $secOut (SENSITIVE - contents not logged)"
+                }
+                $success = $true
+            }
+            $outResolved = (Resolve-Path $OutputDir).Path
+            Write-Host "`nDone. Saved to: $outResolved"
+            Write-TLog -Msg "SUCCESS - saved to $outResolved"
+        }
+        finally {
+            if (Get-Variable blob -Scope Local -ErrorAction SilentlyContinue) { $blob = $null; [System.GC]::Collect() }
+            $rf = "$(& wsl.exe @dd -u root -- bash -c "ls -1 '$remote/logs' 2>/dev/null | head -1")".Trim()
+            if ($rf) {
+                $wslLog = ConvertTo-WslPath $script:LogDir
+                & wsl.exe @dd -u root -- cp -r "$remote/logs/$rf" "$wslLog/" 2>$null
+                if ($LASTEXITCODE -eq 0) { Write-Host "Build logs saved to $script:LogDir\$rf"; Write-TLog -Msg "Copied build logs to $script:LogDir\$rf" }
+                else { Write-Warning "Build logs were NOT copied back - diagnose from $remote before cleanup."; Write-TLog -Level Warning -Msg "Build logs not copied (cp failed)" }
+            } else { Write-Warning "Build logs were NOT copied back (none present) - diagnose before cleanup."; Write-TLog -Level Warning -Msg "Build logs not copied (none present)" }
+
+            $keep = $KeepRemote -or ((-not $success) -and $KeepOnFailure)
+            if ($keep) {
+                $why = if ($KeepRemote) { 'KeepRemote' } else { 'KeepOnFailure (run failed)' }
+                Write-Warning "WSL work dir KEPT at $remote ($why) - it holds cleartext credentials. Remove it:  wsl.exe $($dd -join ' ') -u root -- rm -rf '$remote'"
+                if ($built -and -not $success) { Write-Host "  A built ISO is there; copy it out:  wsl.exe $($dd -join ' ') -u root -- cp '$remote'/*_UNATTENDED.iso <dest>" }
+                Write-TLog -Level Warning -Msg "WSL work dir KEPT ($remote) - $why"
+            } else {
+                & wsl.exe @dd -u root -- rm -rf "$remote" 2>$null
+                if ($LASTEXITCODE -eq 0) { Write-Host "Cleaned up WSL work dir."; Write-TLog -Msg "Cleaned up WSL work dir $remote" }
+                else { Write-Warning "CLEANUP FAILED - the WSL work dir may remain at $remote (cleartext creds). Remove:  wsl.exe $($dd -join ' ') -u root -- rm -rf '$remote'"; Write-TLog -Level Error -Msg "WSL cleanup FAILED: $remote" }
+            }
+            if ($success) { Write-TLog -Msg "TRANSPORT RESULT: SUCCESS" } else { Write-TLog -Level Error -Msg "TRANSPORT RESULT: FAILURE" }
+            Write-Host "Transport log: $script:TLog"
+        }
+        return
+    }
 
     Write-Host "Connecting to $BuildHost ..."
     Write-TLog -Msg "Connecting to $BuildHost (non-interactive build, role=$Role)"
