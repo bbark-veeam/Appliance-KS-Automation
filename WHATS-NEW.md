@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-26 (v2.0.7)
+- The GUI window no longer runs past the bottom of the screen when **Advanced** is expanded. It's now capped to the screen's working area and **scrolls** when the content is taller, so it stays usable on smaller or non-full-screen RDP sessions (not just full-screen 1080p). If it would still run off the bottom, it nudges itself up to stay on-screen.
+
 ## New changes — 2026-06-26 (v2.0.6)
 - Fixed a layout bug in the GUI's **Advanced** section: the bottom field (**veeamso recovery token**) was clipped and overlapped the **Build ISO** button. The Advanced panel is now sized to fit all its fields, and the window grows/shrinks as you open or close Advanced — so nothing overlaps and there's no dead space.
 

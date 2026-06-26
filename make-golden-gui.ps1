@@ -690,10 +690,26 @@ $txtLog = New-Object System.Windows.Forms.TextBox; $txtLog.SetBounds($LX, 44, 66
 $advCollapsedTop = $y          # where the bottom panel sits when Advanced is hidden
 $advExpandedTop = $y + 8 + $grpAdv.Height
 $pnlBottom.Top = $advCollapsedTop
-# Size the form to exactly fit the bottom panel: compact when Advanced is collapsed,
-# grown when it opens (the toggle handler re-sizes it). Keeps the Build panel clear of
-# the Advanced fields and avoids dead space below.
-$form.ClientSize = New-Object System.Drawing.Size(700, ($pnlBottom.Top + $pnlBottom.Height + 12))
+# Fit the form to the bottom panel, but NEVER taller than the screen working area:
+# cap there and let AutoScroll provide a scrollbar (important on smaller / non-full-
+# screen RDP sessions). When capped, widen by the scrollbar width so the vertical bar
+# doesn't force a horizontal one, and - once shown - nudge the form up if it would run
+# off the bottom of the screen.
+function Set-FormFit {
+    $needed = $pnlBottom.Top + $pnlBottom.Height + 12
+    $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $maxH = [Math]::Max(400, $wa.Height - 64)
+    if ($needed -gt $maxH) {
+        $vsb = [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth
+        $form.ClientSize = New-Object System.Drawing.Size((700 + $vsb), $maxH)
+    } else {
+        $form.ClientSize = New-Object System.Drawing.Size(700, $needed)
+    }
+    if ($form.IsHandleCreated -and $form.Bottom -gt $wa.Bottom) {
+        $form.Top = [Math]::Max($wa.Top, ($wa.Bottom - $form.Height))
+    }
+}
+Set-FormFit
 
 # ---- field-rule helpers -----------------------------------------------------
 function Update-FormRules {
@@ -755,7 +771,7 @@ $btnOut.Add_Click({
 $chkAdvanced.Add_CheckedChanged({
     $grpAdv.Visible = $chkAdvanced.Checked
     $pnlBottom.Top = if ($chkAdvanced.Checked) { $advExpandedTop } else { $advCollapsedTop }
-    $form.ClientSize = New-Object System.Drawing.Size(700, ($pnlBottom.Top + $pnlBottom.Height + 12))
+    Set-FormFit
 })
 $chkByo.Add_CheckedChanged({
     $txtAdminKey.Enabled = $chkByo.Checked
