@@ -20,7 +20,9 @@ on:
         required: true
 
 permissions:
-  contents: write   # required to create/update the release
+  contents: write       # create/update the release
+  id-token: write       # keyless signing (OIDC) for the build-provenance attestation
+  attestations: write   # record the attestation in the repo's attestation store
 
 jobs:
   release:
@@ -47,6 +49,16 @@ jobs:
         run: |
           chmod +x package-kit.sh
           ./package-kit.sh
+
+      # Provenance: GitHub signs the built kit with this workflow's OIDC identity
+      # (keyless, via Sigstore) and records a transparency-log attestation. Verify with:
+      #   gh attestation verify <kit>.zip --repo <owner>/<repo>
+      # The runner's builds/ is created fresh this run, so the glob matches only the
+      # current version's zip (older retained backups exist only on the maintainer's box).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'builds/Veeam-Appliance-Kickstart-Kit-v*.zip'
 
       - name: Build release notes (quick start + new changes)
         run: |
@@ -76,13 +88,20 @@ jobs:
           VER="$(tr -d '[:space:]' < VERSION)"
           ASSET="builds/Veeam-Appliance-Kickstart-Kit-v${VER}.zip"
           test -f "$ASSET" || { echo "::error::Expected asset not found: $ASSET"; exit 1; }
+          # Publish a SHA-256 checksum next to the kit so operators can verify the
+          # download is intact + untampered before running it (it handles SSH + creds).
+          # Verify on Linux:    sha256sum -c Veeam-Appliance-Kickstart-Kit-v${VER}.zip.sha256
+          # Verify on Windows:  Get-FileHash .\Veeam-Appliance-Kickstart-Kit-v${VER}.zip -Algorithm SHA256
+          SUMS="${ASSET}.sha256"
+          ( cd builds && sha256sum "Veeam-Appliance-Kickstart-Kit-v${VER}.zip" > "Veeam-Appliance-Kickstart-Kit-v${VER}.zip.sha256" )
+          echo "----- checksum -----"; cat "$SUMS"
           if gh release view "v${VER}" >/dev/null 2>&1; then
-            echo "Release v${VER} exists — updating notes and asset."
+            echo "Release v${VER} exists — updating notes and assets."
             gh release edit "v${VER}" --title "v${VER}" --notes-file RELEASE_NOTES.md
-            gh release upload "v${VER}" "$ASSET" --clobber
+            gh release upload "v${VER}" "$ASSET" "$SUMS" --clobber
           else
             echo "Creating release v${VER}."
-            gh release create "v${VER}" "$ASSET" \
+            gh release create "v${VER}" "$ASSET" "$SUMS" \
               --title "v${VER}" \
               --notes-file RELEASE_NOTES.md
           fi

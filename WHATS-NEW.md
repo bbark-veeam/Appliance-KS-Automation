@@ -3,6 +3,16 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-26 (v2.0.0)
+- **New: a single-window graphical builder for Windows.** Double-click **`Launch-GUI.cmd`** and fill in one form — Linux build host + SSH key, ISO type/role, source ISO, hostname prefix, NTP, output folder, and the veeamadmin / veeamso passwords — then click **Build ISO**. No command line, no install. It drives the same remote build as the command-line helper: upload the kit + your ISO to a Linux host, build there, pull the ISO + logs back, and clean up.
+  - **Credentials stay protected.** Passwords are held as a SecureString and sent to the build host **only over the encrypted SSH channel via stdin** — never on a command line, environment variable, or shell history — and cleared from the form after a successful build. The built ISO and the secrets sheet are permission-locked to the building user when they land on your machine.
+  - **Mistakes are caught before the build, not after.** Each password is validated live against the appliance policy (15+ chars; upper/lower/digit/special; no long same-class or repeated runs; veeamadmin must differ from veeamso), with a **Confirm password** field, and **Build** stays disabled until everything passes. NTP, hostname prefix, and bring-your-own MFA keys are validated too.
+  - **Sensible rules built in.** The **Hardened Repository** role forces MFA on both accounts; turning off the Security Officer account greys its fields; and an **Advanced** section keeps power-user options (post-install `%post` script, BYO MFA keys / recovery token, skip-NTP-sync, keep-remote-on-failure) out of the way for the common case. The window sizes to your screen and scrolls if it would run off the bottom.
+  - **First-connection safety.** The first time you build against a host, the form shows its SSH fingerprint and makes you **verify it** — paste the expected SHA256 or type `ACCEPT` — before any credentials are sent (Reject is the default). A **changed** host key is refused outright as a possible man-in-the-middle.
+  - **Live progress.** The build runs in the background so the window never freezes; steps stream into a log pane, and you get a clear success/failure result plus where the ISO and logs were saved.
+- **Release integrity + provenance:** every release now ships a **SHA-256 checksum** and a **signed build-provenance attestation** — see **"Verify your download"** in the README to confirm a download is intact and came from this project's pipeline.
+- The command-line `make-golden-remote.ps1` path is unchanged and still available for scripted/CLI use; the GUI is an addition, not a replacement.
+
 ## New changes — 2026-06-22 (v1.3.0)
 - Added **build logging** so every run leaves a record to diagnose a failed build (or a later install) from:
   - The guided builder writes a **job log** of the run, and the build step writes its own **agent log**; the two share a run id and are grouped in one per-run folder under `logs/`. `generate-secrets.sh` and `check-credentials.sh` also log when run on their own.

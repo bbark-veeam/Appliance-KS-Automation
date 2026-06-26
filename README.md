@@ -35,6 +35,36 @@ your own MFA keys / SO recovery token** (instead of auto-generating), and you ca
 > The VSA ISO also carries `vbem-ks.cfg` (Enterprise Manager) behind a "Veeam
 > Backup Enterprise Manager" submenu — a possible future role.
 
+## Verify your download
+
+This tool handles credentials and connects over SSH, so confirm the kit you
+downloaded is intact and untampered **before** running it. Every GitHub Release
+ships a `…-Kit-v<version>.zip.sha256` checksum next to the `.zip`.
+
+```bash
+# Linux/macOS — from the folder holding both files:
+sha256sum -c Veeam-Appliance-Kickstart-Kit-v<version>.zip.sha256
+```
+```powershell
+# Windows (PowerShell) — compare against the value in the .sha256 file:
+Get-FileHash .\Veeam-Appliance-Kickstart-Kit-v<version>.zip -Algorithm SHA256
+```
+
+The checksum proves the file is **intact**. To also prove **provenance** — that the
+kit was built by this project's official GitHub Actions pipeline and not swapped —
+every release carries a signed build-provenance attestation. Verify it with the
+GitHub CLI ([`gh`](https://cli.github.com/)):
+
+```bash
+gh attestation verify Veeam-Appliance-Kickstart-Kit-v<version>.zip \
+   --repo bbark-veeam/Appliance-KS-Automation
+```
+
+A successful check confirms the artifact came from this repo's release workflow (it
+needs no signing key on your side — verification uses GitHub's transparency log).
+Always download the kit **only from the project's official GitHub Releases page**,
+over HTTPS.
+
 ## ⚠️ Build environment — Linux is REQUIRED
 
 **The ISO must be built on a Linux box. Windows and macOS are not supported for
@@ -107,12 +137,19 @@ host's login user must be **root or able to `sudo`** (the build loop-mounts the 
 ## Configuration model
 - **Role:** `proxy` | `vmware-proxy` | `hardened-repo` | `vsa` | `vbem`, chosen at
   build time (see top of this doc).
-- **Secret keys (MFA + SO recovery token):** generated per deployment by default,
-  via `generate-secrets.sh` (or `make-golden-iso.sh`) — the kit ships placeholders,
-  not preset keys. **Or supply your own:** `make-golden-iso.sh` offers it
-  interactively; `generate-secrets.sh` takes `VEEAMADMIN_MFA` / `VEEAMSO_MFA` /
-  `VEEAMSO_TOKEN` env vars (validated; any omitted are generated). Supplying the
-  same values across builds gives one shared MFA registration fleet-wide.
+- **Secret keys (MFA + SO recovery token):** generated **fresh per build by
+  default** (cryptographically random), via `generate-secrets.sh` (or
+  `make-golden-iso.sh`) — the kit ships placeholders, not preset keys. **Or supply
+  your own:** `make-golden-iso.sh` offers it interactively; `generate-secrets.sh`
+  takes `VEEAMADMIN_MFA` / `VEEAMSO_MFA` / `VEEAMSO_TOKEN` env vars (validated; any
+  omitted are generated).
+  > **Blast radius / key reuse.** Because keys are fresh per build, each golden ISO
+  > is its own trust domain: the shared MFA secret only spans the appliances deployed
+  > from *that* ISO. Reuse widens that domain — supplying the **same** keys across
+  > builds (BYO env vars) makes one MFA registration cover every fleet built that way,
+  > so a single leaked appliance compromises all of them. Prefer the default
+  > (per-build keys); scope deliberate reuse to one rollout, and **rotate** keys/
+  > passwords if a baked appliance is ever exposed.
 - **Passwords:** you supply the two account passwords (must differ; STIG-compliant).
 - **Scope:** one golden ISO, shared credentials across all appliances in a deployment.
 - **MFA:**
