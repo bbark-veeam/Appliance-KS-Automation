@@ -294,17 +294,32 @@ $TransportScript = {
     if ($PrepOnly)       { $mgFlags += " --prep-only" }
 
     # ---- shared pre-copy check: does the ISO contain the selected role's kickstart? ----
-    # Catch a role/ISO mismatch (e.g. role 'vbem' on a VIA ISO) BEFORE copying a multi-GB
-    # ISO only to fail at extraction. Windows-side via Mount-DiskImage; best-effort - if
-    # mounting is policy-blocked we warn and let the build's own extract be the backstop.
-    # Each role's stock kickstart lives at the ISO ROOT.
+    # Catch a wrong ISO (e.g. role 'vbem' on a VIA ISO) BEFORE the expensive transfer -
+    # the scp UPLOAD to the remote host (SSH backend) or the copy into WSL. Each role's
+    # stock kickstart lives at the ISO ROOT.
+    #   GOTCHA (why this isn't a naive Test-Path): Windows CDFS exposes the ISO9660
+    #   namespace, which UPPERCASES names and turns '-' into '_' - so proxy-ks.cfg shows
+    #   up as PROXY_KS.CFG. A Test-Path for the real (Rock Ridge) name ALWAYS misses and
+    #   would reject every valid build. So we check BOTH the literal name (in case a
+    #   future ISO carries Joliet/Rock Ridge to Windows) AND the ISO9660-mangled form,
+    #   across every mounted volume. Best-effort: if mounting is blocked we warn and let
+    #   build-appliance-iso.sh's own xorriso extract-or-die be the authoritative backstop.
     $roleKs = @{ 'proxy' = 'proxy-ks.cfg'; 'vmware-proxy' = 'vmware-proxy-ks.cfg'; 'hardened-repo' = 'hardened-repo-ks.cfg'; 'vsa' = 'vbr-ks.cfg'; 'vbem' = 'vbem-ks.cfg' }[$Role]
     if ($roleKs) {
         $isoHasKs = $null
+        $ksNames  = @($roleKs, ($roleKs.ToUpper() -replace '-', '_'))   # literal + ISO9660-mangled (PROXY_KS.CFG)
         try {
-            $di  = Mount-DiskImage -ImagePath $iso.FullName -PassThru -ErrorAction Stop
-            $drv = ($di | Get-Volume).DriveLetter
-            if ($drv) { $isoHasKs = Test-Path -LiteralPath ("{0}:\{1}" -f $drv, $roleKs) }
+            $di   = Mount-DiskImage -ImagePath $iso.FullName -PassThru -ErrorAction Stop
+            $drvs = @($di | Get-Volume | Where-Object DriveLetter | ForEach-Object DriveLetter)
+            if ($drvs.Count -gt 0) {
+                $isoHasKs = $false
+                foreach ($d in $drvs) {
+                    foreach ($n in $ksNames) {
+                        if (Test-Path -LiteralPath ("{0}:\{1}" -f $d, $n)) { $isoHasKs = $true; break }
+                    }
+                    if ($isoHasKs) { break }
+                }
+            }
         } catch {
             Write-Warning "Could not mount the ISO to pre-verify the role kickstart ($($_.Exception.Message)); proceeding - the build will verify."
         } finally {
