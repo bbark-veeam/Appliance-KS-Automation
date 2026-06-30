@@ -3,6 +3,15 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-30 (v2.1.0)
+- **The graphical builder can now build locally in WSL2 — no SSH, no separate Linux host.** When you launch **`Launch-GUI.cmd`** it now asks **where to build** first:
+  - **Local (WSL2 + xorriso)** — builds right on your Windows machine using WSL2. Pick your WSL distro from a dropdown (your default distro is pre-selected); the form checks that `xorriso` is installed in it and keeps **Build** disabled, with an install hint, until it is. No SSH, no keys, no second machine.
+  - **Remote (Linux host + xorriso)** — the original path: build on a separate Linux host over SSH (host + key + first-connection host-key verification), unchanged.
+  - The same form and the **same `xorriso` build engine** run either way — only the *location* of the build differs. If WSL2 isn't installed, the Local option is disabled with a hint and Remote is pre-selected.
+- **Default output folder is now `C:\temp`** (was the launch directory), so the built ISO, secrets sheet, and logs land in a predictable place outside the kit folder. It's created automatically if it doesn't exist; the secrets sheet is still permission-locked to you.
+- Credential handling is unchanged: passwords are held as a SecureString and fed to the build **via stdin only** (never a command line, environment variable, or history), and the build files are cleaned up when the run finishes.
+- The command-line paths (`make-golden-iso.sh`, `make-golden-remote.ps1`) are unchanged.
+
 ## New changes — 2026-06-26 (v2.0.0)
 - **New: a single-window graphical builder for Windows.** Double-click **`Launch-GUI.cmd`** and fill in one form — Linux build host + SSH key, ISO type/role, source ISO, hostname prefix, NTP, output folder, and the veeamadmin / veeamso passwords — then click **Build ISO**. No command line, no install. It drives the same remote build as the command-line helper: upload the kit + your ISO to a Linux host, build there, pull the ISO + logs back, and clean up.
   - **Credentials stay protected.** Passwords are held as a SecureString and sent to the build host **only over the encrypted SSH channel via stdin** — never on a command line, environment variable, or shell history — and cleared from the form after a successful build. The built ISO and the secrets sheet are permission-locked to the building user when they land on your machine.

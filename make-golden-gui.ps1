@@ -59,6 +59,8 @@ param(
     [switch]$KeepRemote,
     [switch]$KeepOnFailure,   # GUI "Keep on failure" (Advanced): on failure, KEEP the remote workdir
                               # (so a built-but-undownloaded ISO isn't lost) instead of the default rm -rf
+    [ValidateSet('SSH', 'WSL')][string]$BuildBackend = 'SSH',   # SSH = remote Linux over SSH (default); WSL = local WSL2
+    [string]$WslDistro,       # WSL backend only: distro name (blank = WSL default distro)
     [switch]$Gui   # launch the WinForms single-window form (collects the above, then runs the transport)
 )
 $ErrorActionPreference = 'Stop'
@@ -94,7 +96,9 @@ $TransportScript = {
         [switch]$PrepOnly,
         [switch]$KeepRemote,
         [switch]$KeepOnFailure,
-        [string]$KitRoot
+        [string]$KitRoot,
+        [ValidateSet('SSH', 'WSL')][string]$BuildBackend = 'SSH',   # SSH = remote Linux (default); WSL = local WSL2
+        [string]$WslDistro                                          # WSL backend: distro name; blank = WSL default distro
     )
     # Native ssh/scp write progress + banners to stderr; under Windows PowerShell 5.1,
     # $ErrorActionPreference='Stop' turns ANY native stderr into a TERMINATING error
@@ -118,6 +122,30 @@ $TransportScript = {
     # (The GUI also format-validates these before Build; this is the defense-in-depth
     # layer that holds even if a value reaches the transport unchecked.)
     function ConvertTo-ShSq { param([string]$s) "'" + ($s -replace "'", "'\''") + "'" }
+
+    # Assemble the plaintext key=value secrets blob fed to the build over stdin (NOT argv).
+    # Single source for both backends (SSH + WSL); caller scrubs the result ASAP. The build
+    # host strips any trailing CR, so a Windows CRLF on the pipe can't corrupt a value.
+    function New-SecretBlob {
+        $lines = @("veeamadmin.password=" + (ConvertFrom-SecureToPlain $VeeamAdminPassword))
+        if (-not $NoVeeamso) { $lines += "veeamso.password=" + (ConvertFrom-SecureToPlain $VeeamsoPassword) }
+        if ($ByoKeys) {
+            if ($VeeamAdminMfaKey)                          { $lines += "veeamadmin.mfaSecretKey=$VeeamAdminMfaKey" }
+            if (-not $NoVeeamso -and $VeeamsoMfaKey)         { $lines += "veeamso.mfaSecretKey=$VeeamsoMfaKey" }
+            if (-not $NoVeeamso -and $VeeamsoRecoveryToken)  { $lines += "veeamso.recoveryToken=$VeeamsoRecoveryToken" }
+        }
+        ($lines -join "`n")
+    }
+
+    # Translate a Windows path to its WSL /mnt path in-process (avoids quoting a backslash
+    # path through wsl.exe + a subprocess per file). C:\Users\x -> /mnt/c/Users/x.
+    function ConvertTo-WslPath {
+        param([string]$WinPath)
+        $full = $WinPath
+        try { $rp = (Resolve-Path -LiteralPath $WinPath -ErrorAction Stop).Path; if ($rp) { $full = $rp } } catch { }
+        if ($full -match '^([A-Za-z]):[\\/](.*)$') { '/mnt/' + $Matches[1].ToLower() + '/' + ($Matches[2] -replace '\\', '/') }
+        else { $full -replace '\\', '/' }
+    }
 
     # Lock a pulled-back artifact down to the current Windows user - the built ISO and
     # the secrets file both carry CLEARTEXT credentials, so on a shared/multi-user box
@@ -193,13 +221,21 @@ $TransportScript = {
     }
 
     # ---- preflight ----------------------------------------------------------
-    foreach ($t in 'ssh', 'scp') {
-        if (-not (Get-Command $t -ErrorAction SilentlyContinue)) {
-            throw "$t not found. Install the Windows OpenSSH client:  Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"
-        }
-    }
-    foreach ($req in 'BuildHost', 'IsoPath', 'Role', 'Ntp') {
+    foreach ($req in 'IsoPath', 'Role', 'Ntp') {
         if ([string]::IsNullOrWhiteSpace((Get-Variable $req -ValueOnly))) { throw "Missing required parameter: -$req" }
+    }
+    if ($BuildBackend -eq 'SSH') {
+        foreach ($t in 'ssh', 'scp') {
+            if (-not (Get-Command $t -ErrorAction SilentlyContinue)) {
+                throw "$t not found. Install the Windows OpenSSH client:  Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($BuildHost)) { throw "Missing required parameter: -BuildHost (SSH backend)" }
+    } else {
+        # WSL2 local backend: wsl.exe must be present (WSL2 installed + a distro).
+        if (-not (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) {
+            throw "wsl.exe not found - WSL2 is not installed/enabled. Run 'wsl --install', or use the Remote (SSH) backend."
+        }
     }
     if (-not $VeeamAdminPassword) { throw "Missing required -VeeamAdminPassword (SecureString)" }
     if (-not $NoVeeamso -and -not $VeeamsoPassword) { throw "Missing -VeeamsoPassword (SecureString) - or pass -NoVeeamso to disable the account" }
@@ -220,8 +256,10 @@ $TransportScript = {
     # additionally presents an explicit type-to-confirm dialog BEFORE this runs, so the
     # key is normally already in known_hosts by the time the transport connects.
     $sshOpts = @('-o', 'StrictHostKeyChecking=accept-new')
-    if ($IdentityFile) { $sshOpts += @('-i', $IdentityFile) }
-    else { Write-Warning "No -IdentityFile: with password auth you'll be prompted on EVERY step (and the build's stdin secret feed can break). Use SSH key auth." }
+    if ($BuildBackend -eq 'SSH') {
+        if ($IdentityFile) { $sshOpts += @('-i', $IdentityFile) }
+        else { Write-Warning "No -IdentityFile: with password auth you'll be prompted on EVERY step (and the build's stdin secret feed can break). Use SSH key auth." }
+    }
 
     # All logs (this transport log + the pulled-back per-run folder) live under
     # $OutputDir\logs\ so they land in ONE predictable place; the ISO + secrets file
@@ -237,7 +275,7 @@ $TransportScript = {
             "Tool: [Veeam Appliance Kickstart - COMMUNITY TOOL, NOT an official Veeam product]"
             "Report issues: [https://github.com/bbark-veeam/Appliance-KS-Automation/issues]"
             ("Module: [make-golden-gui.ps1] (Windows non-interactive transport). PID: [{0}], Host: [{1}]" -f $PID, $env:COMPUTERNAME)
-            ("CmdLineParams: [BuildHost={0}; Role={1}; IsoPath={2}; OutputDir={3}; PrepOnly={4}]" -f $BuildHost, $Role, $iso.Name, $OutputDir, [bool]$PrepOnly)
+            ("CmdLineParams: [Backend={0}; Target={1}; Role={2}; IsoPath={3}; OutputDir={4}; PrepOnly={5}]" -f $BuildBackend, $(if ($BuildBackend -eq 'WSL') { if ($WslDistro) { "wsl:$WslDistro" } else { 'wsl:(default)' } } else { $BuildHost }), $Role, $iso.Name, $OutputDir, [bool]$PrepOnly)
             ""
         )
     } catch { }
@@ -254,6 +292,182 @@ $TransportScript = {
     if ($ByoKeys)        { $mgFlags += " --byo-keys" }
     if ($CustomPost)     { $mgFlags += " --custom-post $(ConvertTo-ShSq ('./' + (Split-Path -Leaf $CustomPost)))" }
     if ($PrepOnly)       { $mgFlags += " --prep-only" }
+
+    # ---- shared pre-copy check: does the ISO contain the selected role's kickstart? ----
+    # Catch a wrong ISO (e.g. role 'vbem' on a VIA ISO) BEFORE the expensive transfer -
+    # the scp UPLOAD to the remote host (SSH backend) or the copy into WSL. Each role's
+    # stock kickstart lives at the ISO ROOT.
+    #   GOTCHA (why this isn't a naive Test-Path): Windows CDFS exposes the ISO9660
+    #   namespace, which UPPERCASES names and turns '-' into '_' - so proxy-ks.cfg shows
+    #   up as PROXY_KS.CFG. A Test-Path for the real (Rock Ridge) name ALWAYS misses and
+    #   would reject every valid build. So we check BOTH the literal name (in case a
+    #   future ISO carries Joliet/Rock Ridge to Windows) AND the ISO9660-mangled form,
+    #   across every mounted volume. Best-effort: if mounting is blocked we warn and let
+    #   build-appliance-iso.sh's own xorriso extract-or-die be the authoritative backstop.
+    $roleKs = @{ 'proxy' = 'proxy-ks.cfg'; 'vmware-proxy' = 'vmware-proxy-ks.cfg'; 'hardened-repo' = 'hardened-repo-ks.cfg'; 'vsa' = 'vbr-ks.cfg'; 'vbem' = 'vbem-ks.cfg' }[$Role]
+    if ($roleKs) {
+        $isoHasKs = $null
+        $ksNames  = @($roleKs, ($roleKs.ToUpper() -replace '-', '_'))   # literal + ISO9660-mangled (PROXY_KS.CFG)
+        try {
+            $di   = Mount-DiskImage -ImagePath $iso.FullName -PassThru -ErrorAction Stop
+            $drvs = @($di | Get-Volume | Where-Object DriveLetter | ForEach-Object DriveLetter)
+            if ($drvs.Count -gt 0) {
+                $isoHasKs = $false
+                foreach ($d in $drvs) {
+                    foreach ($n in $ksNames) {
+                        if (Test-Path -LiteralPath ("{0}:\{1}" -f $d, $n)) { $isoHasKs = $true; break }
+                    }
+                    if ($isoHasKs) { break }
+                }
+            }
+        } catch {
+            Write-Warning "Could not mount the ISO to pre-verify the role kickstart ($($_.Exception.Message)); proceeding - the build will verify."
+        } finally {
+            Dismount-DiskImage -ImagePath $iso.FullName -ErrorAction SilentlyContinue | Out-Null
+        }
+        if ($isoHasKs -eq $false) {
+            Write-TLog -Level Error -Msg "Pre-check FAILED: ISO has no /$roleKs for role $Role"
+            throw "The selected ISO has no '/$roleKs' at its root, so it can't build the '$Role' role. Wrong ISO? proxy/vmware-proxy/hardened-repo need the VeeamInfrastructureAppliance ISO; vsa/vbem need the VeeamSoftwareAppliance ISO."
+        }
+        if ($isoHasKs) { Write-TLog -Msg "Pre-check OK: ISO contains /$roleKs (role $Role)" }
+    }
+
+    # =========================================================================
+    #  WSL2 LOCAL BACKEND - build in WSL2 on this machine as root (no SSH).
+    #  Mirrors the SSH flow with wsl.exe + cp instead of ssh + scp; reuses the
+    #  same non-interactive make-golden engine + stdin secrets (+ build-host CR
+    #  strip) + Protect-LocalFile + logging.
+    # =========================================================================
+    if ($BuildBackend -eq 'WSL') {
+        $env:WSL_UTF8 = '1'   # force UTF-8 from wsl.exe so captured output parses (no UTF-16/nulls)
+        $dd = @(); if ($WslDistro) { $dd = @('-d', $WslDistro) }
+        $wslLabel = if ($WslDistro) { $WslDistro } else { '(default distro)' }
+        Write-Host "Building locally in WSL2: $wslLabel"
+        Write-TLog -Msg "WSL backend: distro=$wslLabel"
+
+        $xchk = (& wsl.exe @dd -u root -- bash -lc 'command -v xorriso >/dev/null 2>&1 && echo OK || echo NO' 2>&1 | Select-Object -Last 1)
+        if (("$xchk").Trim() -ne 'OK') {
+            throw "xorriso is not installed in WSL distro '$wslLabel'. Install it there (sudo apt install -y xorriso  /  sudo dnf install -y xorriso) and retry."
+        }
+
+        # Free-space pre-check on the ACTUAL work filesystem (/var/tmp), NOT / and NOT the
+        # default /tmp tmpfs. The build copies the source ISO in AND writes the rebuilt ISO
+        # in the work dir (~2x the ISO), so require ~2.2x up front. This is the honest reading
+        # Stage 0 should give: df'ing / overstates free space (the ext4 vhdx max), and /tmp
+        # being a RAM tmpfs understated it (the original failure). df -P guarantees one data line.
+        $wkRoot = '/var/tmp'
+        $dfRaw  = & wsl.exe @dd -u root -- bash -lc "df -Pk '$wkRoot' 2>/dev/null"
+        $dfData = ($dfRaw | Where-Object { "$_" -match '^\S' } | Select-Object -Last 1)
+        $cols   = ("$dfData").Trim() -split '\s+'
+        $availKb = [int64]0
+        if ($cols.Count -ge 4 -and [int64]::TryParse($cols[3], [ref]$availKb)) {
+            $availBytes = $availKb * 1024
+            $needBytes  = [int64]($iso.Length * 2.2)
+            Write-TLog -Msg ("WSL work FS {0}: {1:N1} GB free; need ~{2:N1} GB (~2.2x the {3:N1} GB ISO)" -f $wkRoot, ($availBytes / 1GB), ($needBytes / 1GB), ($iso.Length / 1GB))
+            if ($availBytes -lt $needBytes) {
+                throw ("Not enough space on the WSL work filesystem {0}: {1:N1} GB free, but the build needs ~{2:N1} GB (the {3:N1} GB source ISO is copied in AND the rebuilt ISO is written there). The WSL ext4 vhdx is capped by free space on the Windows host - free up disk where the distro's vhdx lives, or use the Remote (SSH) backend." -f $wkRoot, ($availBytes / 1GB), ($needBytes / 1GB), ($iso.Length / 1GB))
+            }
+            Write-Host ("Work FS {0}: {1:N1} GB free (need ~{2:N1} GB) - OK" -f $wkRoot, ($availBytes / 1GB), ($needBytes / 1GB))
+        } else {
+            Write-Warning "Could not read free space on $wkRoot (df output unparseable); proceeding - xorriso will fail loudly if space runs short."
+            Write-TLog -Level Warning -Msg "WSL work FS space pre-check skipped (df unparseable)"
+        }
+
+        # Work dir on /var/tmp (ext4 vhdx), NOT the default /tmp: on systemd WSL2 distros /tmp is a
+        # RAM-backed tmpfs sized ~50% of VM memory (e.g. 2.9G on a 5.8G box), too small to hold the
+        # copied-in source ISO (~1.8G) PLUS the rebuilt output ISO (~1.8G) -> xorriso fails with
+        # "Image size ... exceeds free space on media". /var/tmp lives on / with the real vhdx space.
+        $remote = (& wsl.exe @dd -u root -- mktemp -d -p /var/tmp 2>&1 | Where-Object { "$_" -match '^/\S' } | Select-Object -Last 1)
+        $remote = "$remote".Trim()
+        if ([string]::IsNullOrWhiteSpace($remote)) { throw "Could not create a WSL work dir (mktemp -d failed)." }
+        Write-Host "WSL work dir: $remote"
+        Write-TLog -Msg "WSL work dir: $remote"
+
+        $success = $false; $built = $false
+        try {
+            Write-TLog -Msg ("Copying kit ({0} files) + ISO into WSL" -f $needed.Count)
+            foreach ($f in $needed) {
+                $src = ConvertTo-WslPath (Join-Path $kit $f)
+                & wsl.exe @dd -u root -- cp "$src" "$remote/"
+                if ($LASTEXITCODE -ne 0) { throw "Failed to copy kit file '$f' into WSL." }
+            }
+            if ($CustomPost) {
+                $cpSrc = ConvertTo-WslPath $CustomPost
+                & wsl.exe @dd -u root -- cp "$cpSrc" "$remote/"
+                if ($LASTEXITCODE -ne 0) { throw "Failed to copy the custom-post file into WSL." }
+            }
+            $wslIso = ConvertTo-WslPath $iso.FullName
+            Write-Host ("Copying ISO ({0:N2} GB) into WSL ..." -f ($iso.Length / 1GB))
+            Write-TLog -Msg ("Copying source ISO {0} into WSL" -f $iso.Name)
+            & wsl.exe @dd -u root -- cp "$wslIso" "$remote/"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to copy the ISO into WSL." }
+
+            $blob = New-SecretBlob
+            $isoName = $iso.Name
+            $buildCmd = "cd $(ConvertTo-ShSq $remote) && chmod +x *.sh && ./make-golden-iso.sh $mgFlags $(ConvertTo-ShSq ('./' + $isoName))"
+            Write-Host "`nBuilding in WSL ($wslLabel), non-interactive ..."
+            Write-TLog -Msg "Invoking non-interactive build in WSL (secrets via stdin; not captured here)"
+            $blob | & wsl.exe @dd -u root -- bash -c $buildCmd
+            $buildRc = $LASTEXITCODE
+            $blob = $null; [System.GC]::Collect()
+            if ($buildRc -ne 0) { Write-TLog -Level Error -Msg "WSL build failed (exit $buildRc)"; throw "WSL build failed (exit $buildRc). $(if (-not $KeepOnFailure) { 'Re-run with -KeepOnFailure to retain the WSL work dir for inspection.' })" }
+
+            if ($PrepOnly) {
+                $success = $true
+                Write-TLog -Msg "prep-only build complete (no ISO produced)"
+                Write-Host "Prep-only complete in WSL (no ISO). Logs will be copied back."
+            } else {
+                $info = & wsl.exe @dd -u root -- bash -c "cd $(ConvertTo-ShSq $remote) && ls -1 *_UNATTENDED.iso 2>/dev/null; echo '---SECRETS---'; ls -1 veeam-*-secrets-*.txt 2>/dev/null"
+                $sep = [array]::IndexOf($info, '---SECRETS---')
+                $isoOut = if ($sep -ge 1) { ($info[0..($sep - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
+                $secOut = if ($sep -ge 0 -and $sep -lt ($info.Count - 1)) { ($info[($sep + 1)..($info.Count - 1)] | Where-Object { $_ } | Select-Object -Last 1) } else { $null }
+                if ([string]::IsNullOrWhiteSpace($isoOut)) { throw "No built ISO (*_UNATTENDED.iso) in the WSL work dir - the build may not have completed." }
+                $built = $true; $isoOut = "$isoOut".Trim()
+                Write-TLog -Msg "Built ISO: $isoOut"
+                $wslOut = ConvertTo-WslPath ((Resolve-Path $OutputDir).Path)
+                Write-Host "`nCopying built ISO back ..."
+                & wsl.exe @dd -u root -- cp "$remote/$isoOut" "$wslOut/"
+                if ($LASTEXITCODE -ne 0) { Write-TLog -Level Error -Msg "Built-ISO copy-back failed"; throw "Copy-back of the built ISO failed." }
+                Write-TLog -Msg "Copied built ISO to $OutputDir"
+                Protect-LocalFile (Join-Path $OutputDir $isoOut)
+                if (-not [string]::IsNullOrWhiteSpace($secOut)) {
+                    $secOut = "$secOut".Trim()
+                    & wsl.exe @dd -u root -- cp "$remote/$secOut" "$wslOut/"
+                    Protect-LocalFile (Join-Path $OutputDir $secOut)
+                    Write-TLog -Msg "Copied secrets file: $secOut (SENSITIVE - contents not logged)"
+                }
+                $success = $true
+            }
+            $outResolved = (Resolve-Path $OutputDir).Path
+            Write-Host "`nDone. Saved to: $outResolved"
+            Write-TLog -Msg "SUCCESS - saved to $outResolved"
+        }
+        finally {
+            if (Get-Variable blob -Scope Local -ErrorAction SilentlyContinue) { $blob = $null; [System.GC]::Collect() }
+            $rf = "$(& wsl.exe @dd -u root -- bash -c "ls -1 '$remote/logs' 2>/dev/null | head -1")".Trim()
+            if ($rf) {
+                $wslLog = ConvertTo-WslPath $script:LogDir
+                & wsl.exe @dd -u root -- cp -r "$remote/logs/$rf" "$wslLog/" 2>$null
+                if ($LASTEXITCODE -eq 0) { Write-Host "Build logs saved to $script:LogDir\$rf"; Write-TLog -Msg "Copied build logs to $script:LogDir\$rf" }
+                else { Write-Warning "Build logs were NOT copied back - diagnose from $remote before cleanup."; Write-TLog -Level Warning -Msg "Build logs not copied (cp failed)" }
+            } else { Write-Warning "Build logs were NOT copied back (none present) - diagnose before cleanup."; Write-TLog -Level Warning -Msg "Build logs not copied (none present)" }
+
+            $keep = $KeepRemote -or ((-not $success) -and $KeepOnFailure)
+            if ($keep) {
+                $why = if ($KeepRemote) { 'KeepRemote' } else { 'KeepOnFailure (run failed)' }
+                Write-Warning "WSL work dir KEPT at $remote ($why) - it holds cleartext credentials. Remove it:  wsl.exe $($dd -join ' ') -u root -- rm -rf '$remote'"
+                if ($built -and -not $success) { Write-Host "  A built ISO is there; copy it out:  wsl.exe $($dd -join ' ') -u root -- cp '$remote'/*_UNATTENDED.iso <dest>" }
+                Write-TLog -Level Warning -Msg "WSL work dir KEPT ($remote) - $why"
+            } else {
+                & wsl.exe @dd -u root -- rm -rf "$remote" 2>$null
+                if ($LASTEXITCODE -eq 0) { Write-Host "Cleaned up WSL work dir."; Write-TLog -Msg "Cleaned up WSL work dir $remote" }
+                else { Write-Warning "CLEANUP FAILED - the WSL work dir may remain at $remote (cleartext creds). Remove:  wsl.exe $($dd -join ' ') -u root -- rm -rf '$remote'"; Write-TLog -Level Error -Msg "WSL cleanup FAILED: $remote" }
+            }
+            if ($success) { Write-TLog -Msg "TRANSPORT RESULT: SUCCESS" } else { Write-TLog -Level Error -Msg "TRANSPORT RESULT: FAILURE" }
+            Write-Host "Transport log: $script:TLog"
+        }
+        return
+    }
 
     Write-Host "Connecting to $BuildHost ..."
     Write-TLog -Msg "Connecting to $BuildHost (non-interactive build, role=$Role)"
@@ -586,6 +800,93 @@ function Confirm-HostKey {
     return $true
 }
 
+# ---- backend selection (Slice B): Local WSL2 vs Remote SSH ------------------
+# Enumerate installed WSL distros + the default distro. wsl.exe can emit UTF-16 /
+# stray NUL bytes, so we force WSL_UTF8 and also strip NULs defensively, or the
+# captured list won't parse. Returns @{ List = @(names); Default = 'name' }.
+function Get-WslInfo {
+    $info = @{ List = @(); Default = '' }
+    if (-not (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) { return $info }
+    $env:WSL_UTF8 = '1'
+    $raw   = & wsl.exe -l -q 2>$null
+    $names = @($raw | ForEach-Object { ("$_" -replace "`0", '').Trim() } | Where-Object { $_ })
+    $info.List = $names
+    # default distro = the '*'-marked row in `wsl -l -v`
+    $verbose = & wsl.exe -l -v 2>$null
+    foreach ($ln in $verbose) {
+        $t = ("$ln" -replace "`0", '').TrimEnd()
+        if ($t -match '^\s*\*\s+(\S+)') { $info.Default = $Matches[1]; break }
+    }
+    if (-not $info.Default -and $names.Count) { $info.Default = $names[0] }
+    return $info
+}
+
+# Is xorriso present in the given WSL distro? Probed as root, exactly as the build runs.
+function Test-WslXorriso {
+    param([string]$Distro)
+    if (-not $Distro) { return $false }
+    $env:WSL_UTF8 = '1'
+    $out = (& wsl.exe -d $Distro -u root -- bash -lc 'command -v xorriso >/dev/null 2>&1 && echo OK || echo NO' 2>$null | Select-Object -Last 1)
+    return (("$out").Trim() -eq 'OK')
+}
+
+# The "where do you want to build?" chooser, shown BEFORE the form. Returns 'WSL',
+# 'SSH', or $null (cancel). Hard-gates Local: if WSL2 isn't installed / has no distro,
+# that option is disabled with a reason and Remote (SSH) is preselected.
+function Show-BackendChooser {
+    param([bool]$WslAvailable)
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Veeam Appliance Kickstart - choose build target"
+    $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = 'CenterScreen'; $dlg.ClientSize = New-Object System.Drawing.Size(540, 250)
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.SetBounds(16, 14, 508, 36)
+    $lbl.Text = "Where do you want to build the ISO? The same xorriso engine runs either way - only the location of the build differs."
+    $dlg.Controls.Add($lbl)
+
+    $rbLocal = New-Object System.Windows.Forms.RadioButton
+    $rbLocal.SetBounds(24, 58, 490, 24); $rbLocal.Text = "Local  (WSL2 + xorriso)  -  build on this Windows box, no SSH"
+    $dlg.Controls.Add($rbLocal)
+    $lblLocal = New-Object System.Windows.Forms.Label
+    $lblLocal.SetBounds(46, 82, 470, 18); $lblLocal.ForeColor = [System.Drawing.Color]::DimGray
+    $dlg.Controls.Add($lblLocal)
+
+    $rbRemote = New-Object System.Windows.Forms.RadioButton
+    $rbRemote.SetBounds(24, 112, 490, 24); $rbRemote.Text = "Remote (Linux host + xorriso)  -  build on a separate Linux host over SSH"
+    $dlg.Controls.Add($rbRemote)
+    $lblRemote = New-Object System.Windows.Forms.Label
+    $lblRemote.SetBounds(46, 136, 470, 18); $lblRemote.ForeColor = [System.Drawing.Color]::DimGray
+    $lblRemote.Text = "Needs SSH access + a key to a Linux host that has xorriso."
+    $dlg.Controls.Add($lblRemote)
+
+    if ($WslAvailable) {
+        $rbLocal.Checked = $true
+        $lblLocal.Text = "Builds in WSL2 on this machine (no SSH, no keys)."
+    } else {
+        $rbLocal.Enabled = $false
+        $lblLocal.ForeColor = [System.Drawing.Color]::Firebrick
+        $lblLocal.Text = "WSL2 not detected - run 'wsl --install' (with a distro that has xorriso) to enable Local."
+        $rbRemote.Checked = $true
+    }
+
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.SetBounds(336, 200, 90, 32); $btnOk.Text = "Continue"; $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.Controls.Add($btnOk); $dlg.AcceptButton = $btnOk
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.SetBounds(432, 200, 90, 32); $btnCancel.Text = "Cancel"; $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($btnCancel); $dlg.CancelButton = $btnCancel
+
+    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+    if ($rbLocal.Checked) { return 'WSL' } else { return 'SSH' }
+}
+
+# ---- choose the build backend up front --------------------------------------
+$script:WslInfo = Get-WslInfo
+$script:Backend = Show-BackendChooser -WslAvailable ([bool]$script:WslInfo.List.Count)
+if (-not $script:Backend) { return }   # user cancelled the chooser
+
 # ---- the form ---------------------------------------------------------------
 $kitVersion = try { (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -ErrorAction Stop | Select-Object -First 1).Trim() } catch { '' }
 
@@ -603,17 +904,38 @@ function Add-RowLabel { param([string]$Text, [int]$Top, [int]$Width = 190)
 
 $banner = New-Object System.Windows.Forms.Label
 $banner.SetBounds($LX, $y, 668, 16); $banner.ForeColor = [System.Drawing.Color]::DimGray
-$banner.Text = "Community tool - NOT an official Veeam product. Builds on a remote Linux host over SSH."
+$banner.Text = "Community tool - NOT an official Veeam product. " + $(if ($script:Backend -eq 'WSL') { "Building locally in WSL2 (xorriso)." } else { "Building on a remote Linux host over SSH (xorriso)." })
 $form.Controls.Add($banner); $y += 28
 
-# Linux host + SSH login
-Add-RowLabel "Linux build host (IP/DNS):" $y | Out-Null
+# ---- connection block ----
+# The Remote (SSH) fields and the Local (WSL2) fields share this region; only the
+# backend-appropriate set is shown (Set-BackendVisibility below). WSL needs fewer
+# rows than SSH, so it fits inside the (taller) SSH region with no reflow of the
+# rows beneath it.
+$connTop = $y
+
+# Remote (SSH): host / user / key
+$lblHostCap = Add-RowLabel "Linux build host (IP/DNS):" $y
 $txtHost = New-Object System.Windows.Forms.TextBox; $txtHost.SetBounds($CX, $y, $CW, 22); $form.Controls.Add($txtHost); $y += 30
-Add-RowLabel "SSH username:" $y | Out-Null
+$lblUserCap = Add-RowLabel "SSH username:" $y
 $txtUser = New-Object System.Windows.Forms.TextBox; $txtUser.SetBounds($CX, $y, 200, 22); $txtUser.Text = 'root'; $form.Controls.Add($txtUser); $y += 30
-Add-RowLabel "SSH private key file:" $y | Out-Null
+$lblKeyCap = Add-RowLabel "SSH private key file:" $y
 $txtKey = New-Object System.Windows.Forms.TextBox; $txtKey.SetBounds($CX, $y, ($CW - 90), 22); $form.Controls.Add($txtKey)
 $btnKey = New-Object System.Windows.Forms.Button; $btnKey.SetBounds(($CX + $CW - 84), ($y - 1), 84, 24); $btnKey.Text = "Browse..."; $form.Controls.Add($btnKey); $y += 30
+
+# Local (WSL2): distro picker - overlays the SSH region (built at $connTop)
+$lblWslCap = Add-RowLabel "Build distro (WSL2):" $connTop
+$cboWslDistro = New-Object System.Windows.Forms.ComboBox; $cboWslDistro.SetBounds($CX, $connTop, 260, 22); $cboWslDistro.DropDownStyle = 'DropDownList'
+if ($script:WslInfo.List.Count) { [void]$cboWslDistro.Items.AddRange([object[]]$script:WslInfo.List) }
+$form.Controls.Add($cboWslDistro)
+$btnWslRefresh = New-Object System.Windows.Forms.Button; $btnWslRefresh.SetBounds(($CX + 270), ($connTop - 1), 84, 24); $btnWslRefresh.Text = "Refresh"; $form.Controls.Add($btnWslRefresh)
+$lblWslStatus = New-Object System.Windows.Forms.Label; $lblWslStatus.SetBounds($CX, ($connTop + 30), $CW, 18); $form.Controls.Add($lblWslStatus)
+if ($script:WslInfo.Default -and $cboWslDistro.Items.Contains($script:WslInfo.Default)) { $cboWslDistro.SelectedItem = $script:WslInfo.Default }
+elseif ($cboWslDistro.Items.Count) { $cboWslDistro.SelectedIndex = 0 }
+
+$script:sshConnCtrls = @($lblHostCap, $txtHost, $lblUserCap, $txtUser, $lblKeyCap, $txtKey, $btnKey)
+$script:wslConnCtrls = @($lblWslCap, $cboWslDistro, $btnWslRefresh, $lblWslStatus)
+$script:wslReady = $false
 
 # Role
 Add-RowLabel "ISO type (role):" $y | Out-Null
@@ -637,7 +959,7 @@ $txtNtp = New-Object System.Windows.Forms.TextBox; $txtNtp.SetBounds($CX, $y, 26
 
 # Output folder
 Add-RowLabel "Output folder (ISO + logs):" $y | Out-Null
-$txtOut = New-Object System.Windows.Forms.TextBox; $txtOut.SetBounds($CX, $y, ($CW - 90), 22); $txtOut.Text = (Get-Location).Path; $form.Controls.Add($txtOut)
+$txtOut = New-Object System.Windows.Forms.TextBox; $txtOut.SetBounds($CX, $y, ($CW - 90), 22); $txtOut.Text = 'C:\temp'; $form.Controls.Add($txtOut)
 $btnOut = New-Object System.Windows.Forms.Button; $btnOut.SetBounds(($CX + $CW - 84), ($y - 1), 84, 24); $btnOut.Text = "Browse..."; $form.Controls.Add($btnOut); $y += 36
 
 # ---- credentials ----
@@ -747,7 +1069,37 @@ function Update-Validation {
         elseif ($txtSoPw2.Text -cne $txtSoPw.Text) { $lblSoMsg.Text = "passwords do not match"; $lblSoMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okSo = $false }
         else { $lblSoMsg.Text = "OK"; $lblSoMsg.ForeColor = [System.Drawing.Color]::ForestGreen; $okSo = $true }
     }
-    $btnBuild.Enabled = ($okAdmin -and $okSo -and -not $script:Building)
+    $backendOK = if ($script:Backend -eq 'WSL') { [bool]$script:wslReady } else { $true }
+    $btnBuild.Enabled = ($okAdmin -and $okSo -and $backendOK -and -not $script:Building)
+}
+
+# Show only the connection controls for the chosen backend (Local WSL2 vs Remote SSH).
+function Set-BackendVisibility {
+    $ssh = ($script:Backend -eq 'SSH')
+    foreach ($c in $script:sshConnCtrls) { if ($c) { $c.Visible = $ssh } }
+    foreach ($c in $script:wslConnCtrls) { if ($c) { $c.Visible = -not $ssh } }
+}
+
+# Probe xorriso in the selected WSL distro; reflect it in the status label and gate Build
+# (WSL backend only). Mirrors the live-password-validation pattern: block Build with a hint.
+function Update-WslStatus {
+    if ($script:Backend -ne 'WSL') { $script:wslReady = $true; return }
+    $distro = [string]$cboWslDistro.SelectedItem
+    if (-not $distro) {
+        $script:wslReady = $false
+        $lblWslStatus.Text = "No WSL distro selected."; $lblWslStatus.ForeColor = [System.Drawing.Color]::Firebrick
+        return
+    }
+    $isDefault = ($distro -eq $script:WslInfo.Default)
+    if (Test-WslXorriso -Distro $distro) {
+        $script:wslReady = $true
+        $lblWslStatus.Text = "xorriso: OK" + $(if ($isDefault) { "  (default distro)" } else { '' })
+        $lblWslStatus.ForeColor = [System.Drawing.Color]::ForestGreen
+    } else {
+        $script:wslReady = $false
+        $lblWslStatus.Text = "xorriso NOT found in '$distro' - install it (sudo apt install -y xorriso / sudo dnf install -y xorriso)."
+        $lblWslStatus.ForeColor = [System.Drawing.Color]::Firebrick
+    }
 }
 
 # ---- wire events ------------------------------------------------------------
@@ -782,6 +1134,15 @@ $txtAdminPw.Add_TextChanged({ Update-Validation })
 $txtAdminPw2.Add_TextChanged({ Update-Validation })
 $txtSoPw.Add_TextChanged({ Update-Validation })
 $txtSoPw2.Add_TextChanged({ Update-Validation })
+$cboWslDistro.Add_SelectedIndexChanged({ Update-WslStatus; Update-Validation })
+$btnWslRefresh.Add_Click({
+    $script:WslInfo = Get-WslInfo
+    $cboWslDistro.Items.Clear()
+    if ($script:WslInfo.List.Count) { [void]$cboWslDistro.Items.AddRange([object[]]$script:WslInfo.List) }
+    if ($script:WslInfo.Default -and $cboWslDistro.Items.Contains($script:WslInfo.Default)) { $cboWslDistro.SelectedItem = $script:WslInfo.Default }
+    elseif ($cboWslDistro.Items.Count) { $cboWslDistro.SelectedIndex = 0 }
+    Update-WslStatus; Update-Validation
+})
 
 # ---- Build -> background runspace + live status feed ------------------------
 $script:Building = $false
@@ -854,17 +1215,25 @@ $btnBuild.Add_Click({
     # ---- gather + validate ----
     $hostName = $txtHost.Text.Trim()
     $user = $txtUser.Text.Trim()
-    if (-not $hostName) { [System.Windows.Forms.MessageBox]::Show("Enter the Linux build host.", "Missing field", 'OK', 'Warning') | Out-Null; return }
-    if (-not $user) { [System.Windows.Forms.MessageBox]::Show("Enter the SSH username.", "Missing field", 'OK', 'Warning') | Out-Null; return }
+    $distro = [string]$cboWslDistro.SelectedItem
+    if ($script:Backend -eq 'SSH') {
+        if (-not $hostName) { [System.Windows.Forms.MessageBox]::Show("Enter the Linux build host.", "Missing field", 'OK', 'Warning') | Out-Null; return }
+        if (-not $user) { [System.Windows.Forms.MessageBox]::Show("Enter the SSH username.", "Missing field", 'OK', 'Warning') | Out-Null; return }
+        if ($txtKey.Text.Trim() -and -not (Test-Path -LiteralPath $txtKey.Text.Trim())) { [System.Windows.Forms.MessageBox]::Show("The SSH key file was not found.", "Bad key path", 'OK', 'Warning') | Out-Null; return }
+    } else {
+        if (-not $distro) { [System.Windows.Forms.MessageBox]::Show("Pick a WSL distro to build in.", "Missing field", 'OK', 'Warning') | Out-Null; return }
+        if (-not $script:wslReady) { [System.Windows.Forms.MessageBox]::Show("xorriso is not available in the selected WSL distro '$distro'. Install it (sudo apt install -y xorriso / sudo dnf install -y xorriso), then click Refresh.", "xorriso missing", 'OK', 'Warning') | Out-Null; return }
+    }
     if (-not (Test-Path -LiteralPath $txtIso.Text.Trim())) { [System.Windows.Forms.MessageBox]::Show("Pick a source ISO that exists.", "Missing ISO", 'OK', 'Warning') | Out-Null; return }
     if (-not $txtNtp.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show("Enter an NTP server (an IP is recommended).", "Missing field", 'OK', 'Warning') | Out-Null; return }
-    if ($txtKey.Text.Trim() -and -not (Test-Path -LiteralPath $txtKey.Text.Trim())) { [System.Windows.Forms.MessageBox]::Show("The SSH key file was not found.", "Bad key path", 'OK', 'Warning') | Out-Null; return }
     if ($chkAdvanced.Checked -and $txtPost.Text.Trim() -and -not (Test-Path -LiteralPath $txtPost.Text.Trim())) { [System.Windows.Forms.MessageBox]::Show("The %post script was not found.", "Bad path", 'OK', 'Warning') | Out-Null; return }
     # ---- format-validate the free-text fields that reach the remote command line ----
     # (the transport also shell-escapes these; this catches typos early and rejects
     # anything outside a safe charset before we connect at all.)
-    if ($hostName -notmatch '^[A-Za-z0-9][A-Za-z0-9.\-:]*$') { [System.Windows.Forms.MessageBox]::Show("The Linux host should be a hostname or IP (letters, digits, dot, hyphen, colon).", "Bad host", 'OK', 'Warning') | Out-Null; return }
-    if ($user -notmatch '^[A-Za-z0-9._-]+$') { [System.Windows.Forms.MessageBox]::Show("The SSH username may only contain letters, digits, dot, underscore, or hyphen.", "Bad username", 'OK', 'Warning') | Out-Null; return }
+    if ($script:Backend -eq 'SSH') {
+        if ($hostName -notmatch '^[A-Za-z0-9][A-Za-z0-9.\-:]*$') { [System.Windows.Forms.MessageBox]::Show("The Linux host should be a hostname or IP (letters, digits, dot, hyphen, colon).", "Bad host", 'OK', 'Warning') | Out-Null; return }
+        if ($user -notmatch '^[A-Za-z0-9._-]+$') { [System.Windows.Forms.MessageBox]::Show("The SSH username may only contain letters, digits, dot, underscore, or hyphen.", "Bad username", 'OK', 'Warning') | Out-Null; return }
+    }
     if ($txtNtp.Text.Trim() -notmatch '^[A-Za-z0-9][A-Za-z0-9 .,:_-]*$') { [System.Windows.Forms.MessageBox]::Show("The NTP server may only contain letters, digits, and . , : _ - (one or more servers; an IP is recommended).", "Bad NTP value", 'OK', 'Warning') | Out-Null; return }
     if ($txtPrefix.Text.Trim()) {
         $pfx = $txtPrefix.Text.Trim()
@@ -877,16 +1246,18 @@ $btnBuild.Add_Click({
         if ($chkVeeamso.Checked -and $txtSoTok.Text.Trim() -and -not (Test-Guid ($txtSoTok.Text.Trim()))) { [System.Windows.Forms.MessageBox]::Show("veeamso recovery token must be a GUID (XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX).", "Bad token", 'OK', 'Warning') | Out-Null; return }
     }
 
-    # ---- host-key type-to-confirm (DECISION 4) - BEFORE any credential leaves ----
-    $lblStatus.Text = "Verifying SSH host key..."; $lblStatus.ForeColor = [System.Drawing.Color]::Black
-    if (-not (Confirm-HostKey -HostOnly $hostName)) {
-        $lblStatus.Text = "Host key not accepted - build cancelled."; $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
-        return
+    # ---- host-key type-to-confirm (DECISION 4) - BEFORE any credential leaves (SSH only) ----
+    # The Local (WSL2) backend uses no SSH/network, so there is no host key to verify.
+    if ($script:Backend -eq 'SSH') {
+        $lblStatus.Text = "Verifying SSH host key..."; $lblStatus.ForeColor = [System.Drawing.Color]::Black
+        if (-not (Confirm-HostKey -HostOnly $hostName)) {
+            $lblStatus.Text = "Host key not accepted - build cancelled."; $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
+            return
+        }
     }
 
     # ---- assemble transport parameters ----
     $p = @{
-        BuildHost          = "$user@$hostName"
         IsoPath            = $txtIso.Text.Trim()
         Role               = [string]$cboRole.SelectedItem
         Ntp                = $txtNtp.Text.Trim()
@@ -894,7 +1265,13 @@ $btnBuild.Add_Click({
         KitRoot            = $PSScriptRoot
         VeeamAdminPassword = (ConvertTo-SecureStringPlain $txtAdminPw.Text)
     }
-    if ($txtKey.Text.Trim())    { $p.IdentityFile   = $txtKey.Text.Trim() }
+    if ($script:Backend -eq 'SSH') {
+        $p.BuildHost = "$user@$hostName"
+        if ($txtKey.Text.Trim()) { $p.IdentityFile = $txtKey.Text.Trim() }
+    } else {
+        $p.BuildBackend = 'WSL'
+        $p.WslDistro    = $distro
+    }
     if ($txtPrefix.Text.Trim()) { $p.HostnamePrefix = $txtPrefix.Text.Trim() }
     if ($chkAdminMfa.Checked)   { $p.VeeamAdminMfa  = $true }
     if (-not $chkVeeamso.Checked) {
@@ -920,9 +1297,9 @@ $btnBuild.Add_Click({
     $script:infoIdx = 0; $script:warnIdx = 0; $script:errIdx = 0
     $script:Building = $true
     $btnBuild.Enabled = $false
-    $lblStatus.Text = "Building on $hostName - this takes several minutes (ISO upload + build + pull)..."
+    $lblStatus.Text = if ($script:Backend -eq 'WSL') { "Building locally in WSL2 ($distro) - this takes several minutes (copy-in + build + copy-out)..." } else { "Building on $hostName - this takes several minutes (ISO upload + build + pull)..." }
     $lblStatus.ForeColor = [System.Drawing.Color]::Black
-    Add-LogLine "Starting build. Secrets are sent only over the SSH channel via stdin; the remote workdir is cleaned up at the end."
+    Add-LogLine $(if ($script:Backend -eq 'WSL') { "Starting build. Secrets are piped to the WSL build via stdin (never argv); the WSL work dir is cleaned up at the end." } else { "Starting build. Secrets are sent only over the SSH channel via stdin; the remote workdir is cleaned up at the end." })
 
     $script:ps = [powershell]::Create()
     [void]$script:ps.AddScript($TransportScript.ToString())
@@ -932,7 +1309,9 @@ $btnBuild.Add_Click({
 })
 
 # initial state + show
+Set-BackendVisibility
 Update-FormRules
+Update-WslStatus
 Update-Validation
 $form.Add_FormClosing({ Clear-SensitiveFields })   # never leave cleartext in a closed-but-not-collected form
 [void]$form.ShowDialog()
