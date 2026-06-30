@@ -350,7 +350,11 @@ $TransportScript = {
             throw "xorriso is not installed in WSL distro '$wslLabel'. Install it there (sudo apt install -y xorriso  /  sudo dnf install -y xorriso) and retry."
         }
 
-        $remote = (& wsl.exe @dd -u root -- mktemp -d 2>&1 | Where-Object { "$_" -match '^/\S' } | Select-Object -Last 1)
+        # Work dir on /var/tmp (ext4 vhdx), NOT the default /tmp: on systemd WSL2 distros /tmp is a
+        # RAM-backed tmpfs sized ~50% of VM memory (e.g. 2.9G on a 5.8G box), too small to hold the
+        # copied-in source ISO (~1.8G) PLUS the rebuilt output ISO (~1.8G) -> xorriso fails with
+        # "Image size ... exceeds free space on media". /var/tmp lives on / with the real vhdx space.
+        $remote = (& wsl.exe @dd -u root -- mktemp -d -p /var/tmp 2>&1 | Where-Object { "$_" -match '^/\S' } | Select-Object -Last 1)
         $remote = "$remote".Trim()
         if ([string]::IsNullOrWhiteSpace($remote)) { throw "Could not create a WSL work dir (mktemp -d failed)." }
         Write-Host "WSL work dir: $remote"
@@ -383,7 +387,7 @@ $TransportScript = {
             $blob | & wsl.exe @dd -u root -- bash -c $buildCmd
             $buildRc = $LASTEXITCODE
             $blob = $null; [System.GC]::Collect()
-            if ($buildRc -ne 0) { Write-TLog -Level Error -Msg "WSL build failed (exit $buildRc)"; throw "WSL build failed (exit $buildRc). Work dir kept for inspection (see below)." }
+            if ($buildRc -ne 0) { Write-TLog -Level Error -Msg "WSL build failed (exit $buildRc)"; throw "WSL build failed (exit $buildRc). $(if (-not $KeepOnFailure) { 'Re-run with -KeepOnFailure to retain the WSL work dir for inspection.' })" }
 
             if ($PrepOnly) {
                 $success = $true
