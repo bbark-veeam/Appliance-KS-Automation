@@ -959,7 +959,7 @@ $txtNtp = New-Object System.Windows.Forms.TextBox; $txtNtp.SetBounds($CX, $y, 26
 
 # Output folder
 Add-RowLabel "Output folder (ISO + logs):" $y | Out-Null
-$txtOut = New-Object System.Windows.Forms.TextBox; $txtOut.SetBounds($CX, $y, ($CW - 90), 22); $txtOut.Text = (Get-Location).Path; $form.Controls.Add($txtOut)
+$txtOut = New-Object System.Windows.Forms.TextBox; $txtOut.SetBounds($CX, $y, ($CW - 90), 22); $txtOut.Text = 'C:\temp'; $form.Controls.Add($txtOut)
 $btnOut = New-Object System.Windows.Forms.Button; $btnOut.SetBounds(($CX + $CW - 84), ($y - 1), 84, 24); $btnOut.Text = "Browse..."; $form.Controls.Add($btnOut); $y += 36
 
 # ---- credentials ----

@@ -88,7 +88,33 @@ Do **not** attempt a native PowerShell/Windows reimplementation of the build —
 the boot fidelity cannot be guaranteed. (`generate-secrets.sh` could run anywhere,
 but keep the whole workflow on the Linux box for simplicity.)
 
+### Building on Windows — the graphical builder (`Launch-GUI.cmd`, easiest)
+
+Double-click **`Launch-GUI.cmd`** for a single-window builder — no command line. On
+launch it asks **where you want to build**:
+
+- **Local (WSL2 + xorriso)** — build right on this Windows box using WSL2; no SSH and
+  no separate host. Requires WSL2 with a distro that has `xorriso` (see *Building on
+  Windows via WSL* below for the one-time setup). The builder lists your installed
+  distros, pre-selects your default, and keeps **Build** disabled — with an install
+  hint — until `xorriso` is present in the chosen distro. If WSL2 isn't installed at
+  all, this option is disabled and Remote is pre-selected.
+- **Remote (Linux host + xorriso)** — build on a separate Linux host over SSH (see
+  *Building on Windows via a remote Linux host* below). You supply the host, SSH user,
+  and key; the first connection makes you verify the host's SSH fingerprint before any
+  credentials are sent.
+
+Either way you fill the **same form** — role, source ISO, hostname prefix, NTP, output
+folder (defaults to `C:\temp`), and the veeamadmin / veeamso passwords — then click
+**Build ISO**. Passwords are held as a SecureString and handed to the build **via stdin
+only** (never a command line or environment variable); the built ISO + secrets sheet are
+permission-locked to you, and the build files are cleaned up when the run finishes. The
+**same `xorriso` engine** runs in both modes — only the *location* of the build differs.
+
 ### Building on Windows via WSL
+
+> Prefer the graphical builder above for a guided experience — its **Local (WSL2)**
+> option drives this same WSL build for you. The manual steps below are for CLI use.
 
 WSL (Windows Subsystem for Linux) is a genuine Linux environment that runs on
 Windows, so it satisfies the Linux requirement above — the `.sh` scripts run
