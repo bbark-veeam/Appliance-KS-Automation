@@ -350,6 +350,29 @@ $TransportScript = {
             throw "xorriso is not installed in WSL distro '$wslLabel'. Install it there (sudo apt install -y xorriso  /  sudo dnf install -y xorriso) and retry."
         }
 
+        # Free-space pre-check on the ACTUAL work filesystem (/var/tmp), NOT / and NOT the
+        # default /tmp tmpfs. The build copies the source ISO in AND writes the rebuilt ISO
+        # in the work dir (~2x the ISO), so require ~2.2x up front. This is the honest reading
+        # Stage 0 should give: df'ing / overstates free space (the ext4 vhdx max), and /tmp
+        # being a RAM tmpfs understated it (the original failure). df -P guarantees one data line.
+        $wkRoot = '/var/tmp'
+        $dfRaw  = & wsl.exe @dd -u root -- bash -lc "df -Pk '$wkRoot' 2>/dev/null"
+        $dfData = ($dfRaw | Where-Object { "$_" -match '^\S' } | Select-Object -Last 1)
+        $cols   = ("$dfData").Trim() -split '\s+'
+        $availKb = [int64]0
+        if ($cols.Count -ge 4 -and [int64]::TryParse($cols[3], [ref]$availKb)) {
+            $availBytes = $availKb * 1024
+            $needBytes  = [int64]($iso.Length * 2.2)
+            Write-TLog -Msg ("WSL work FS {0}: {1:N1} GB free; need ~{2:N1} GB (~2.2x the {3:N1} GB ISO)" -f $wkRoot, ($availBytes / 1GB), ($needBytes / 1GB), ($iso.Length / 1GB))
+            if ($availBytes -lt $needBytes) {
+                throw ("Not enough space on the WSL work filesystem {0}: {1:N1} GB free, but the build needs ~{2:N1} GB (the {3:N1} GB source ISO is copied in AND the rebuilt ISO is written there). The WSL ext4 vhdx is capped by free space on the Windows host - free up disk where the distro's vhdx lives, or use the Remote (SSH) backend." -f $wkRoot, ($availBytes / 1GB), ($needBytes / 1GB), ($iso.Length / 1GB))
+            }
+            Write-Host ("Work FS {0}: {1:N1} GB free (need ~{2:N1} GB) - OK" -f $wkRoot, ($availBytes / 1GB), ($needBytes / 1GB))
+        } else {
+            Write-Warning "Could not read free space on $wkRoot (df output unparseable); proceeding - xorriso will fail loudly if space runs short."
+            Write-TLog -Level Warning -Msg "WSL work FS space pre-check skipped (df unparseable)"
+        }
+
         # Work dir on /var/tmp (ext4 vhdx), NOT the default /tmp: on systemd WSL2 distros /tmp is a
         # RAM-backed tmpfs sized ~50% of VM memory (e.g. 2.9G on a 5.8G box), too small to hold the
         # copied-in source ISO (~1.8G) PLUS the rebuilt output ISO (~1.8G) -> xorriso fails with
