@@ -995,11 +995,11 @@ $txtPost = New-Object System.Windows.Forms.TextBox; $txtPost.SetBounds(196, $ay,
 $btnPost = New-Object System.Windows.Forms.Button; $btnPost.SetBounds(582, ($ay - 1), 74, 24); $btnPost.Text = "Browse..."; $grpAdv.Controls.Add($btnPost); $ay += 30
 $chkByo = New-Object System.Windows.Forms.CheckBox; $chkByo.SetBounds(12, $ay, 620, 22); $chkByo.Text = "Bring your own MFA keys / recovery token (blank = auto-generate)"; $grpAdv.Controls.Add($chkByo); $ay += 26
 $lblAdminKey = New-Object System.Windows.Forms.Label; $lblAdminKey.SetBounds(12, ($ay + 3), 200, 18); $lblAdminKey.Text = "veeamadmin MFA key (16 Base32):"; $grpAdv.Controls.Add($lblAdminKey)
-$txtAdminKey = New-Object System.Windows.Forms.TextBox; $txtAdminKey.SetBounds(216, $ay, 200, 22); $txtAdminKey.Enabled = $false; $grpAdv.Controls.Add($txtAdminKey); $ay += 26
+$txtAdminKey = New-Object System.Windows.Forms.TextBox; $txtAdminKey.SetBounds(216, $ay, 200, 22); $txtAdminKey.UseSystemPasswordChar = $true; $txtAdminKey.Enabled = $false; $grpAdv.Controls.Add($txtAdminKey); $ay += 26
 $lblSoKey = New-Object System.Windows.Forms.Label; $lblSoKey.SetBounds(12, ($ay + 3), 200, 18); $lblSoKey.Text = "veeamso MFA key (16 Base32):"; $grpAdv.Controls.Add($lblSoKey)
-$txtSoKey = New-Object System.Windows.Forms.TextBox; $txtSoKey.SetBounds(216, $ay, 200, 22); $txtSoKey.Enabled = $false; $grpAdv.Controls.Add($txtSoKey); $ay += 26
+$txtSoKey = New-Object System.Windows.Forms.TextBox; $txtSoKey.SetBounds(216, $ay, 200, 22); $txtSoKey.UseSystemPasswordChar = $true; $txtSoKey.Enabled = $false; $grpAdv.Controls.Add($txtSoKey); $ay += 26
 $lblSoTok = New-Object System.Windows.Forms.Label; $lblSoTok.SetBounds(12, ($ay + 3), 200, 18); $lblSoTok.Text = "veeamso recovery token (GUID):"; $grpAdv.Controls.Add($lblSoTok)
-$txtSoTok = New-Object System.Windows.Forms.TextBox; $txtSoTok.SetBounds(216, $ay, 300, 22); $txtSoTok.Enabled = $false; $grpAdv.Controls.Add($txtSoTok)
+$txtSoTok = New-Object System.Windows.Forms.TextBox; $txtSoTok.SetBounds(216, $ay, 300, 22); $txtSoTok.UseSystemPasswordChar = $true; $txtSoTok.Enabled = $false; $grpAdv.Controls.Add($txtSoTok)
 
 # Bottom panel (Build + status + log) - repositioned when Advanced toggles.
 $pnlBottom = New-Object System.Windows.Forms.Panel

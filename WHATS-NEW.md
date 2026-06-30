@@ -3,6 +3,9 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-06-30 (v2.1.1)
+- **The graphical builder now masks the bring-your-own MFA keys and recovery token.** Under **Advanced -> "Bring your own MFA keys / recovery token"**, the veeamadmin/veeamso MFA keys and the veeamso recovery token are now hidden as you type or paste them — the same masking the password fields already use. These are secrets (the MFA key is the TOTP seed; the recovery token bypasses MFA), so they should not sit in cleartext on screen (e.g. during a screen-share or demo). Format validation and the after-build field clear are unchanged.
+
 ## New changes — 2026-06-30 (v2.1.0)
 - **The graphical builder can now build locally in WSL2 — no SSH, no separate Linux host.** When you launch **`Launch-GUI.cmd`** it now asks **where to build** first:
   - **Local (WSL2 + xorriso)** — builds right on your Windows machine using WSL2. Pick your WSL distro from a dropdown (your default distro is pre-selected); the form checks that `xorriso` is installed in it and keeps **Build** disabled, with an install hint, until it is. No SSH, no keys, no second machine.
