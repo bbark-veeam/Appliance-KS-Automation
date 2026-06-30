@@ -800,6 +800,93 @@ function Confirm-HostKey {
     return $true
 }
 
+# ---- backend selection (Slice B): Local WSL2 vs Remote SSH ------------------
+# Enumerate installed WSL distros + the default distro. wsl.exe can emit UTF-16 /
+# stray NUL bytes, so we force WSL_UTF8 and also strip NULs defensively, or the
+# captured list won't parse. Returns @{ List = @(names); Default = 'name' }.
+function Get-WslInfo {
+    $info = @{ List = @(); Default = '' }
+    if (-not (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) { return $info }
+    $env:WSL_UTF8 = '1'
+    $raw   = & wsl.exe -l -q 2>$null
+    $names = @($raw | ForEach-Object { ("$_" -replace "`0", '').Trim() } | Where-Object { $_ })
+    $info.List = $names
+    # default distro = the '*'-marked row in `wsl -l -v`
+    $verbose = & wsl.exe -l -v 2>$null
+    foreach ($ln in $verbose) {
+        $t = ("$ln" -replace "`0", '').TrimEnd()
+        if ($t -match '^\s*\*\s+(\S+)') { $info.Default = $Matches[1]; break }
+    }
+    if (-not $info.Default -and $names.Count) { $info.Default = $names[0] }
+    return $info
+}
+
+# Is xorriso present in the given WSL distro? Probed as root, exactly as the build runs.
+function Test-WslXorriso {
+    param([string]$Distro)
+    if (-not $Distro) { return $false }
+    $env:WSL_UTF8 = '1'
+    $out = (& wsl.exe -d $Distro -u root -- bash -lc 'command -v xorriso >/dev/null 2>&1 && echo OK || echo NO' 2>$null | Select-Object -Last 1)
+    return (("$out").Trim() -eq 'OK')
+}
+
+# The "where do you want to build?" chooser, shown BEFORE the form. Returns 'WSL',
+# 'SSH', or $null (cancel). Hard-gates Local: if WSL2 isn't installed / has no distro,
+# that option is disabled with a reason and Remote (SSH) is preselected.
+function Show-BackendChooser {
+    param([bool]$WslAvailable)
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Veeam Appliance Kickstart - choose build target"
+    $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = 'CenterScreen'; $dlg.ClientSize = New-Object System.Drawing.Size(540, 250)
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.SetBounds(16, 14, 508, 36)
+    $lbl.Text = "Where do you want to build the ISO? The same xorriso engine runs either way - only the location of the build differs."
+    $dlg.Controls.Add($lbl)
+
+    $rbLocal = New-Object System.Windows.Forms.RadioButton
+    $rbLocal.SetBounds(24, 58, 490, 24); $rbLocal.Text = "Local  (WSL2 + xorriso)  -  build on this Windows box, no SSH"
+    $dlg.Controls.Add($rbLocal)
+    $lblLocal = New-Object System.Windows.Forms.Label
+    $lblLocal.SetBounds(46, 82, 470, 18); $lblLocal.ForeColor = [System.Drawing.Color]::DimGray
+    $dlg.Controls.Add($lblLocal)
+
+    $rbRemote = New-Object System.Windows.Forms.RadioButton
+    $rbRemote.SetBounds(24, 112, 490, 24); $rbRemote.Text = "Remote (Linux host + xorriso)  -  build on a separate Linux host over SSH"
+    $dlg.Controls.Add($rbRemote)
+    $lblRemote = New-Object System.Windows.Forms.Label
+    $lblRemote.SetBounds(46, 136, 470, 18); $lblRemote.ForeColor = [System.Drawing.Color]::DimGray
+    $lblRemote.Text = "Needs SSH access + a key to a Linux host that has xorriso."
+    $dlg.Controls.Add($lblRemote)
+
+    if ($WslAvailable) {
+        $rbLocal.Checked = $true
+        $lblLocal.Text = "Builds in WSL2 on this machine (no SSH, no keys)."
+    } else {
+        $rbLocal.Enabled = $false
+        $lblLocal.ForeColor = [System.Drawing.Color]::Firebrick
+        $lblLocal.Text = "WSL2 not detected - run 'wsl --install' (with a distro that has xorriso) to enable Local."
+        $rbRemote.Checked = $true
+    }
+
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.SetBounds(336, 200, 90, 32); $btnOk.Text = "Continue"; $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $dlg.Controls.Add($btnOk); $dlg.AcceptButton = $btnOk
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.SetBounds(432, 200, 90, 32); $btnCancel.Text = "Cancel"; $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $dlg.Controls.Add($btnCancel); $dlg.CancelButton = $btnCancel
+
+    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+    if ($rbLocal.Checked) { return 'WSL' } else { return 'SSH' }
+}
+
+# ---- choose the build backend up front --------------------------------------
+$script:WslInfo = Get-WslInfo
+$script:Backend = Show-BackendChooser -WslAvailable ([bool]$script:WslInfo.List.Count)
+if (-not $script:Backend) { return }   # user cancelled the chooser
+
 # ---- the form ---------------------------------------------------------------
 $kitVersion = try { (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -ErrorAction Stop | Select-Object -First 1).Trim() } catch { '' }
 
@@ -817,17 +904,38 @@ function Add-RowLabel { param([string]$Text, [int]$Top, [int]$Width = 190)
 
 $banner = New-Object System.Windows.Forms.Label
 $banner.SetBounds($LX, $y, 668, 16); $banner.ForeColor = [System.Drawing.Color]::DimGray
-$banner.Text = "Community tool - NOT an official Veeam product. Builds on a remote Linux host over SSH."
+$banner.Text = "Community tool - NOT an official Veeam product. " + $(if ($script:Backend -eq 'WSL') { "Building locally in WSL2 (xorriso)." } else { "Building on a remote Linux host over SSH (xorriso)." })
 $form.Controls.Add($banner); $y += 28
 
-# Linux host + SSH login
-Add-RowLabel "Linux build host (IP/DNS):" $y | Out-Null
+# ---- connection block ----
+# The Remote (SSH) fields and the Local (WSL2) fields share this region; only the
+# backend-appropriate set is shown (Set-BackendVisibility below). WSL needs fewer
+# rows than SSH, so it fits inside the (taller) SSH region with no reflow of the
+# rows beneath it.
+$connTop = $y
+
+# Remote (SSH): host / user / key
+$lblHostCap = Add-RowLabel "Linux build host (IP/DNS):" $y
 $txtHost = New-Object System.Windows.Forms.TextBox; $txtHost.SetBounds($CX, $y, $CW, 22); $form.Controls.Add($txtHost); $y += 30
-Add-RowLabel "SSH username:" $y | Out-Null
+$lblUserCap = Add-RowLabel "SSH username:" $y
 $txtUser = New-Object System.Windows.Forms.TextBox; $txtUser.SetBounds($CX, $y, 200, 22); $txtUser.Text = 'root'; $form.Controls.Add($txtUser); $y += 30
-Add-RowLabel "SSH private key file:" $y | Out-Null
+$lblKeyCap = Add-RowLabel "SSH private key file:" $y
 $txtKey = New-Object System.Windows.Forms.TextBox; $txtKey.SetBounds($CX, $y, ($CW - 90), 22); $form.Controls.Add($txtKey)
 $btnKey = New-Object System.Windows.Forms.Button; $btnKey.SetBounds(($CX + $CW - 84), ($y - 1), 84, 24); $btnKey.Text = "Browse..."; $form.Controls.Add($btnKey); $y += 30
+
+# Local (WSL2): distro picker - overlays the SSH region (built at $connTop)
+$lblWslCap = Add-RowLabel "Build distro (WSL2):" $connTop
+$cboWslDistro = New-Object System.Windows.Forms.ComboBox; $cboWslDistro.SetBounds($CX, $connTop, 260, 22); $cboWslDistro.DropDownStyle = 'DropDownList'
+if ($script:WslInfo.List.Count) { [void]$cboWslDistro.Items.AddRange([object[]]$script:WslInfo.List) }
+$form.Controls.Add($cboWslDistro)
+$btnWslRefresh = New-Object System.Windows.Forms.Button; $btnWslRefresh.SetBounds(($CX + 270), ($connTop - 1), 84, 24); $btnWslRefresh.Text = "Refresh"; $form.Controls.Add($btnWslRefresh)
+$lblWslStatus = New-Object System.Windows.Forms.Label; $lblWslStatus.SetBounds($CX, ($connTop + 30), $CW, 18); $form.Controls.Add($lblWslStatus)
+if ($script:WslInfo.Default -and $cboWslDistro.Items.Contains($script:WslInfo.Default)) { $cboWslDistro.SelectedItem = $script:WslInfo.Default }
+elseif ($cboWslDistro.Items.Count) { $cboWslDistro.SelectedIndex = 0 }
+
+$script:sshConnCtrls = @($lblHostCap, $txtHost, $lblUserCap, $txtUser, $lblKeyCap, $txtKey, $btnKey)
+$script:wslConnCtrls = @($lblWslCap, $cboWslDistro, $btnWslRefresh, $lblWslStatus)
+$script:wslReady = $false
 
 # Role
 Add-RowLabel "ISO type (role):" $y | Out-Null
@@ -961,7 +1069,37 @@ function Update-Validation {
         elseif ($txtSoPw2.Text -cne $txtSoPw.Text) { $lblSoMsg.Text = "passwords do not match"; $lblSoMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okSo = $false }
         else { $lblSoMsg.Text = "OK"; $lblSoMsg.ForeColor = [System.Drawing.Color]::ForestGreen; $okSo = $true }
     }
-    $btnBuild.Enabled = ($okAdmin -and $okSo -and -not $script:Building)
+    $backendOK = if ($script:Backend -eq 'WSL') { [bool]$script:wslReady } else { $true }
+    $btnBuild.Enabled = ($okAdmin -and $okSo -and $backendOK -and -not $script:Building)
+}
+
+# Show only the connection controls for the chosen backend (Local WSL2 vs Remote SSH).
+function Set-BackendVisibility {
+    $ssh = ($script:Backend -eq 'SSH')
+    foreach ($c in $script:sshConnCtrls) { if ($c) { $c.Visible = $ssh } }
+    foreach ($c in $script:wslConnCtrls) { if ($c) { $c.Visible = -not $ssh } }
+}
+
+# Probe xorriso in the selected WSL distro; reflect it in the status label and gate Build
+# (WSL backend only). Mirrors the live-password-validation pattern: block Build with a hint.
+function Update-WslStatus {
+    if ($script:Backend -ne 'WSL') { $script:wslReady = $true; return }
+    $distro = [string]$cboWslDistro.SelectedItem
+    if (-not $distro) {
+        $script:wslReady = $false
+        $lblWslStatus.Text = "No WSL distro selected."; $lblWslStatus.ForeColor = [System.Drawing.Color]::Firebrick
+        return
+    }
+    $isDefault = ($distro -eq $script:WslInfo.Default)
+    if (Test-WslXorriso -Distro $distro) {
+        $script:wslReady = $true
+        $lblWslStatus.Text = "xorriso: OK" + $(if ($isDefault) { "  (default distro)" } else { '' })
+        $lblWslStatus.ForeColor = [System.Drawing.Color]::ForestGreen
+    } else {
+        $script:wslReady = $false
+        $lblWslStatus.Text = "xorriso NOT found in '$distro' - install it (sudo apt install -y xorriso / sudo dnf install -y xorriso)."
+        $lblWslStatus.ForeColor = [System.Drawing.Color]::Firebrick
+    }
 }
 
 # ---- wire events ------------------------------------------------------------
@@ -996,6 +1134,15 @@ $txtAdminPw.Add_TextChanged({ Update-Validation })
 $txtAdminPw2.Add_TextChanged({ Update-Validation })
 $txtSoPw.Add_TextChanged({ Update-Validation })
 $txtSoPw2.Add_TextChanged({ Update-Validation })
+$cboWslDistro.Add_SelectedIndexChanged({ Update-WslStatus; Update-Validation })
+$btnWslRefresh.Add_Click({
+    $script:WslInfo = Get-WslInfo
+    $cboWslDistro.Items.Clear()
+    if ($script:WslInfo.List.Count) { [void]$cboWslDistro.Items.AddRange([object[]]$script:WslInfo.List) }
+    if ($script:WslInfo.Default -and $cboWslDistro.Items.Contains($script:WslInfo.Default)) { $cboWslDistro.SelectedItem = $script:WslInfo.Default }
+    elseif ($cboWslDistro.Items.Count) { $cboWslDistro.SelectedIndex = 0 }
+    Update-WslStatus; Update-Validation
+})
 
 # ---- Build -> background runspace + live status feed ------------------------
 $script:Building = $false
@@ -1068,17 +1215,25 @@ $btnBuild.Add_Click({
     # ---- gather + validate ----
     $hostName = $txtHost.Text.Trim()
     $user = $txtUser.Text.Trim()
-    if (-not $hostName) { [System.Windows.Forms.MessageBox]::Show("Enter the Linux build host.", "Missing field", 'OK', 'Warning') | Out-Null; return }
-    if (-not $user) { [System.Windows.Forms.MessageBox]::Show("Enter the SSH username.", "Missing field", 'OK', 'Warning') | Out-Null; return }
+    $distro = [string]$cboWslDistro.SelectedItem
+    if ($script:Backend -eq 'SSH') {
+        if (-not $hostName) { [System.Windows.Forms.MessageBox]::Show("Enter the Linux build host.", "Missing field", 'OK', 'Warning') | Out-Null; return }
+        if (-not $user) { [System.Windows.Forms.MessageBox]::Show("Enter the SSH username.", "Missing field", 'OK', 'Warning') | Out-Null; return }
+        if ($txtKey.Text.Trim() -and -not (Test-Path -LiteralPath $txtKey.Text.Trim())) { [System.Windows.Forms.MessageBox]::Show("The SSH key file was not found.", "Bad key path", 'OK', 'Warning') | Out-Null; return }
+    } else {
+        if (-not $distro) { [System.Windows.Forms.MessageBox]::Show("Pick a WSL distro to build in.", "Missing field", 'OK', 'Warning') | Out-Null; return }
+        if (-not $script:wslReady) { [System.Windows.Forms.MessageBox]::Show("xorriso is not available in the selected WSL distro '$distro'. Install it (sudo apt install -y xorriso / sudo dnf install -y xorriso), then click Refresh.", "xorriso missing", 'OK', 'Warning') | Out-Null; return }
+    }
     if (-not (Test-Path -LiteralPath $txtIso.Text.Trim())) { [System.Windows.Forms.MessageBox]::Show("Pick a source ISO that exists.", "Missing ISO", 'OK', 'Warning') | Out-Null; return }
     if (-not $txtNtp.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show("Enter an NTP server (an IP is recommended).", "Missing field", 'OK', 'Warning') | Out-Null; return }
-    if ($txtKey.Text.Trim() -and -not (Test-Path -LiteralPath $txtKey.Text.Trim())) { [System.Windows.Forms.MessageBox]::Show("The SSH key file was not found.", "Bad key path", 'OK', 'Warning') | Out-Null; return }
     if ($chkAdvanced.Checked -and $txtPost.Text.Trim() -and -not (Test-Path -LiteralPath $txtPost.Text.Trim())) { [System.Windows.Forms.MessageBox]::Show("The %post script was not found.", "Bad path", 'OK', 'Warning') | Out-Null; return }
     # ---- format-validate the free-text fields that reach the remote command line ----
     # (the transport also shell-escapes these; this catches typos early and rejects
     # anything outside a safe charset before we connect at all.)
-    if ($hostName -notmatch '^[A-Za-z0-9][A-Za-z0-9.\-:]*$') { [System.Windows.Forms.MessageBox]::Show("The Linux host should be a hostname or IP (letters, digits, dot, hyphen, colon).", "Bad host", 'OK', 'Warning') | Out-Null; return }
-    if ($user -notmatch '^[A-Za-z0-9._-]+$') { [System.Windows.Forms.MessageBox]::Show("The SSH username may only contain letters, digits, dot, underscore, or hyphen.", "Bad username", 'OK', 'Warning') | Out-Null; return }
+    if ($script:Backend -eq 'SSH') {
+        if ($hostName -notmatch '^[A-Za-z0-9][A-Za-z0-9.\-:]*$') { [System.Windows.Forms.MessageBox]::Show("The Linux host should be a hostname or IP (letters, digits, dot, hyphen, colon).", "Bad host", 'OK', 'Warning') | Out-Null; return }
+        if ($user -notmatch '^[A-Za-z0-9._-]+$') { [System.Windows.Forms.MessageBox]::Show("The SSH username may only contain letters, digits, dot, underscore, or hyphen.", "Bad username", 'OK', 'Warning') | Out-Null; return }
+    }
     if ($txtNtp.Text.Trim() -notmatch '^[A-Za-z0-9][A-Za-z0-9 .,:_-]*$') { [System.Windows.Forms.MessageBox]::Show("The NTP server may only contain letters, digits, and . , : _ - (one or more servers; an IP is recommended).", "Bad NTP value", 'OK', 'Warning') | Out-Null; return }
     if ($txtPrefix.Text.Trim()) {
         $pfx = $txtPrefix.Text.Trim()
@@ -1091,16 +1246,18 @@ $btnBuild.Add_Click({
         if ($chkVeeamso.Checked -and $txtSoTok.Text.Trim() -and -not (Test-Guid ($txtSoTok.Text.Trim()))) { [System.Windows.Forms.MessageBox]::Show("veeamso recovery token must be a GUID (XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX).", "Bad token", 'OK', 'Warning') | Out-Null; return }
     }
 
-    # ---- host-key type-to-confirm (DECISION 4) - BEFORE any credential leaves ----
-    $lblStatus.Text = "Verifying SSH host key..."; $lblStatus.ForeColor = [System.Drawing.Color]::Black
-    if (-not (Confirm-HostKey -HostOnly $hostName)) {
-        $lblStatus.Text = "Host key not accepted - build cancelled."; $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
-        return
+    # ---- host-key type-to-confirm (DECISION 4) - BEFORE any credential leaves (SSH only) ----
+    # The Local (WSL2) backend uses no SSH/network, so there is no host key to verify.
+    if ($script:Backend -eq 'SSH') {
+        $lblStatus.Text = "Verifying SSH host key..."; $lblStatus.ForeColor = [System.Drawing.Color]::Black
+        if (-not (Confirm-HostKey -HostOnly $hostName)) {
+            $lblStatus.Text = "Host key not accepted - build cancelled."; $lblStatus.ForeColor = [System.Drawing.Color]::Firebrick
+            return
+        }
     }
 
     # ---- assemble transport parameters ----
     $p = @{
-        BuildHost          = "$user@$hostName"
         IsoPath            = $txtIso.Text.Trim()
         Role               = [string]$cboRole.SelectedItem
         Ntp                = $txtNtp.Text.Trim()
@@ -1108,7 +1265,13 @@ $btnBuild.Add_Click({
         KitRoot            = $PSScriptRoot
         VeeamAdminPassword = (ConvertTo-SecureStringPlain $txtAdminPw.Text)
     }
-    if ($txtKey.Text.Trim())    { $p.IdentityFile   = $txtKey.Text.Trim() }
+    if ($script:Backend -eq 'SSH') {
+        $p.BuildHost = "$user@$hostName"
+        if ($txtKey.Text.Trim()) { $p.IdentityFile = $txtKey.Text.Trim() }
+    } else {
+        $p.BuildBackend = 'WSL'
+        $p.WslDistro    = $distro
+    }
     if ($txtPrefix.Text.Trim()) { $p.HostnamePrefix = $txtPrefix.Text.Trim() }
     if ($chkAdminMfa.Checked)   { $p.VeeamAdminMfa  = $true }
     if (-not $chkVeeamso.Checked) {
@@ -1134,9 +1297,9 @@ $btnBuild.Add_Click({
     $script:infoIdx = 0; $script:warnIdx = 0; $script:errIdx = 0
     $script:Building = $true
     $btnBuild.Enabled = $false
-    $lblStatus.Text = "Building on $hostName - this takes several minutes (ISO upload + build + pull)..."
+    $lblStatus.Text = if ($script:Backend -eq 'WSL') { "Building locally in WSL2 ($distro) - this takes several minutes (copy-in + build + copy-out)..." } else { "Building on $hostName - this takes several minutes (ISO upload + build + pull)..." }
     $lblStatus.ForeColor = [System.Drawing.Color]::Black
-    Add-LogLine "Starting build. Secrets are sent only over the SSH channel via stdin; the remote workdir is cleaned up at the end."
+    Add-LogLine $(if ($script:Backend -eq 'WSL') { "Starting build. Secrets are piped to the WSL build via stdin (never argv); the WSL work dir is cleaned up at the end." } else { "Starting build. Secrets are sent only over the SSH channel via stdin; the remote workdir is cleaned up at the end." })
 
     $script:ps = [powershell]::Create()
     [void]$script:ps.AddScript($TransportScript.ToString())
@@ -1146,7 +1309,9 @@ $btnBuild.Add_Click({
 })
 
 # initial state + show
+Set-BackendVisibility
 Update-FormRules
+Update-WslStatus
 Update-Validation
 $form.Add_FormClosing({ Clear-SensitiveFields })   # never leave cleartext in a closed-but-not-collected form
 [void]$form.ShowDialog()
