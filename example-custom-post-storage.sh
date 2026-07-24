@@ -1,12 +1,12 @@
 # =============================================================================
-# example-custom-post-storage.sh — EXAMPLE custom %post snippet (vmware-proxy
+# example-custom-post-storage.sh — EXAMPLE custom %post snippet (storage-proxy
 #                  Direct SAN access prep: iSCSI / NVMe-TCP / multipath)
 # =============================================================================
 # Pass this to the build with:  --custom-post example-custom-post-storage.sh
 # (or pick it at the make-golden-iso.sh "Custom %post" prompt). Its contents are
 # inserted VERBATIM into the appliance install's chroot %post, after the kit's
-# unattended block. Intended for the **vmware-proxy** role (the VIA "with iSCSI &
-# NVMe/TCP" variant). UNSUPPORTED / at your own risk.
+# unattended block. Intended for the **storage-proxy** role (VIA proxy prepped for
+# direct storage access; formerly "vmware-proxy"). UNSUPPORTED / at your own risk.
 #
 # ---- READ THIS FIRST --------------------------------------------------------
 # * This runs at INSTALL time, in the chroot, where **iscsid / multipathd are NOT
@@ -17,7 +17,7 @@
 #         (initiator name, host NQN, multipath.conf, iscsid.conf), and/or
 #     (B) drop a FIRST-BOOT one-shot service that performs discovery + login once
 #         networking is up — mirroring the stock `start-iscsid-once.service`.
-#   The vmware-proxy stock %post already enables iscsid, loads the `nvme-tcp`
+#   The storage-proxy stock %post already enables iscsid, loads the `nvme-tcp`
 #   module, and enables multipathd; this snippet only ADDS your connection config.
 # * Headline use case: **Direct SAN access** — the proxy reads VM data straight
 #   from the production SAN LUNs over iSCSI / NVMe-TCP. That mode has **no VBR-side
@@ -38,7 +38,7 @@
 # you edit it. Copy it, uncomment, and replace the PLACEHOLDER values.
 # -----------------------------------------------------------------------------
 
-log "Custom %post: staging vmware-proxy Direct SAN access config (iSCSI / NVMe-TCP / multipath)"
+log "Custom %post: staging storage-proxy Direct SAN access config (iSCSI / NVMe-TCP / multipath)"
 
 # --- (A) iSCSI initiator name — persistent, read by iscsid at boot ------------
 # echo "InitiatorName=PLACEHOLDER_INITIATOR_IQN" > /etc/iscsi/initiatorname.iscsi

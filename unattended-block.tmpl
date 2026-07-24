@@ -32,7 +32,8 @@ touch /etc/veeam/cockpit_auto_test_disable_init
 log "Unattended: write first-boot answer file /etc/veeam/vbr_init.cfg"
 cat << 'VEEAM_INIT_CFG_EOF' >> /etc/veeam/vbr_init.cfg
 # veeamadmin: full admin account. MFA key baked in; enforcement set per build
-# choice (isMfaEnabled). Hardened-repo forces this to true.
+# choice (isMfaEnabled). MFA invariant: at least one account must carry MFA, so this
+# is FORCED true whenever veeamso is disabled (an enabled veeamso already enforces MFA).
 veeamadmin.password=<<SET_VEEAMADMIN_PASSWORD>>
 veeamadmin.mfaSecretKey=<<GENERATE_VEEAMADMIN_MFA>>
 veeamadmin.isMfaEnabled=false

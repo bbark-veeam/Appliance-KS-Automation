@@ -4,10 +4,12 @@
 #                      Veeam appliance ISO
 # =============================================================================
 # Interactive "easy button" that runs the whole prepare + build flow:
-#   - select role: proxy | vmware-proxy | hardened-repo (VIA ISO) | vsa | vbem (VSA ISO)
+#   - select role: proxy | storage-proxy | hardened-repo (VIA ISO) | vsa | vbem (VSA ISO)
 #   - prompt for the veeamadmin password (hidden, confirmed, validated)
-#   - choose whether veeamadmin MFA is enforced (auto-forced ON for hardened-repo)
 #   - choose whether the veeamso (Security Officer) account is enabled
+#   - choose whether veeamadmin MFA is enforced — MFA invariant: at least one account
+#     must carry MFA, so veeamadmin MFA is FORCED ON when veeamso is disabled
+#   - for a consolidated 13.1+ VIA ISO: pick --disk-layout standard|single (REQUIRED)
 #   - prompt for the veeamso password (when enabled; must differ from veeamadmin)
 #   - prompt for the NTP server(s)
 #   - generate the MFA keys + SO recovery token, OR let you supply your own
@@ -25,8 +27,10 @@
 #
 # NON-INTERACTIVE (drives the GUI / scripted builds — no prompts):
 #   ./make-golden-iso.sh --non-interactive --role <role> [--hostname-prefix P]
-#       --ntp <servers> [--skip-ntp-sync] [--veeamadmin-mfa] [--no-veeamso]
-#       [--byo-keys] [--custom-post FILE] [--prep-only] [source-iso] [output-iso]
+#       [--disk-layout standard|single] --ntp <servers> [--skip-ntp-sync]
+#       [--veeamadmin-mfa] [--no-veeamso] [--byo-keys] [--custom-post FILE]
+#       [--prep-only] [source-iso] [output-iso]
+#   (--disk-layout is REQUIRED for a consolidated 13.1+ VIA ISO, rejected otherwise.)
 #   ...with the SECRETS piped on STDIN (never argv/env/history), one key=value per
 #   line (comments '#...' and blank lines ignored):
 #       veeamadmin.password=...
@@ -58,12 +62,12 @@ NO_LOG=""
 JOB_LOG=""; LOG_DIR=""; RUN_ID=""
 # Non-interactive mode: non-secret inputs via flags; SECRETS via STDIN only.
 NI=0; NI_ROLE=""; NI_PREFIX=""; NI_NTP=""; NI_SKIPNTP=0
-NI_ADMIN_MFA=0; NI_SO=1; NI_BYO=0; NI_CPOST=""
+NI_ADMIN_MFA=0; NI_SO=1; NI_BYO=0; NI_CPOST=""; NI_DISK=""
 ARGS=(); NEXT=""
 for a in "$@"; do
   if [ -n "$NEXT" ]; then
     case "$NEXT" in
-      role) NI_ROLE="$a" ;;  prefix) NI_PREFIX="$a" ;;  ntp) NI_NTP="$a" ;;  cpost) NI_CPOST="$a" ;;
+      role) NI_ROLE="$a" ;;  prefix) NI_PREFIX="$a" ;;  ntp) NI_NTP="$a" ;;  cpost) NI_CPOST="$a" ;;  disk) NI_DISK="$a" ;;
     esac
     NEXT=""; continue
   fi
@@ -72,6 +76,7 @@ for a in "$@"; do
     --no-log)               NO_LOG=1 ;;
     --non-interactive|--ni) NI=1 ;;
     --role)                 NEXT=role ;;    --role=*)               NI_ROLE="${a#*=}" ;;
+    --disk-layout)          NEXT=disk ;;    --disk-layout=*)        NI_DISK="${a#*=}" ;;
     --hostname-prefix)      NEXT=prefix ;;  --hostname-prefix=*)    NI_PREFIX="${a#*=}" ;;
     --ntp)                  NEXT=ntp ;;     --ntp=*)                NI_NTP="${a#*=}" ;;
     --custom-post)          NEXT=cpost ;;   --custom-post=*)        NI_CPOST="${a#*=}" ;;
@@ -98,13 +103,18 @@ on_exit() {
 trap on_exit EXIT
 
 # Role name -> per-role settings (interactive menu + non-interactive both use this).
-set_role_vars() {  # $1 = role name; sets ROLE/ISO_GLOB/DEF_PREFIX; returns 1 if unknown
+# ISO_GLOBS may hold >1 space-separated pattern (the VIA/JEOS ISO was renamed from
+# VeeamInfrastructureAppliance* to VeeamJEOS* in 13.1, so VIA roles match both).
+# ROLE_FAMILY (via|vsa) drives model detection + whether --disk-layout applies.
+set_role_vars() {  # $1 = role name; sets ROLE/ROLE_FAMILY/ISO_GLOBS/DEF_PREFIX; returns 1 if unknown
+  # 'vmware-proxy' is a deprecated alias for 'storage-proxy'.
+  [ "$1" = "vmware-proxy" ] && set -- storage-proxy
   case "$1" in
-    proxy)         ROLE=proxy;         ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vprx ;;
-    vmware-proxy)  ROLE=vmware-proxy;  ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vinf ;;
-    hardened-repo) ROLE=hardened-repo; ISO_GLOB="VeeamInfrastructureAppliance*.iso"; DEF_PREFIX=vlhr ;;
-    vsa)           ROLE=vsa;           ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbr  ;;
-    vbem)          ROLE=vbem;          ISO_GLOB="VeeamSoftwareAppliance*.iso";        DEF_PREFIX=vbem ;;
+    proxy)         ROLE=proxy;         ROLE_FAMILY=via; ISO_GLOBS="VeeamInfrastructureAppliance*.iso VeeamJEOS*.iso"; DEF_PREFIX=vprx ;;
+    storage-proxy) ROLE=storage-proxy; ROLE_FAMILY=via; ISO_GLOBS="VeeamInfrastructureAppliance*.iso VeeamJEOS*.iso"; DEF_PREFIX=vinf ;;
+    hardened-repo) ROLE=hardened-repo; ROLE_FAMILY=via; ISO_GLOBS="VeeamInfrastructureAppliance*.iso VeeamJEOS*.iso"; DEF_PREFIX=vlhr ;;
+    vsa)           ROLE=vsa;           ROLE_FAMILY=vsa; ISO_GLOBS="VeeamSoftwareAppliance*.iso";                      DEF_PREFIX=vbr  ;;
+    vbem)          ROLE=vbem;          ROLE_FAMILY=vsa; ISO_GLOBS="VeeamSoftwareAppliance*.iso";                      DEF_PREFIX=vbem ;;
     *) return 1 ;;
   esac
 }
@@ -193,27 +203,31 @@ echo "============================================================"
 # ---- role -------------------------------------------------------------------
 if [ "$NI" = 1 ]; then
   [ -n "$NI_ROLE" ] || die "--role is required in non-interactive mode"
-  set_role_vars "$NI_ROLE" || die "unknown --role '$NI_ROLE' (proxy|vmware-proxy|hardened-repo|vsa|vbem)"
+  set_role_vars "$NI_ROLE" || die "unknown --role '$NI_ROLE' (proxy|storage-proxy|hardened-repo|vsa|vbem)"
 else
   echo
   echo "Select appliance role:"
   echo "   [1] proxy          — VIA: generic backup proxy"
-  echo "   [2] vmware-proxy   — VIA: VMware proxy with iSCSI & NVMe/TCP storage connectivity"
-  echo "   [3] hardened-repo  — VIA: Veeam Hardened Repository (forces MFA on BOTH accounts)"
+  echo "   [2] storage-proxy  — VIA: backup proxy prepped for direct storage access (iSCSI/NVMe-TCP)"
+  echo "   [3] hardened-repo  — VIA: Veeam Hardened Repository"
   echo "   [4] vsa            — VSA: Veeam Backup & Replication server"
   echo "   [5] vbem           — VSA: Veeam Backup Enterprise Manager"
   while true; do
     read -rp "  Role [1/2/3/4/5]: " r || die "input ended"
     case "$r" in
-      1|proxy)            name=proxy ;;
-      2|vmware-proxy|vmw) name=vmware-proxy ;;
-      3|hardened-repo|hr) name=hardened-repo ;;
-      4|vsa)              name=vsa ;;
-      5|vbem|em)          name=vbem ;;
+      1|proxy)                          name=proxy ;;
+      2|storage-proxy|vmware-proxy|sp)  name=storage-proxy ;;
+      3|hardened-repo|hr)               name=hardened-repo ;;
+      4|vsa)                            name=vsa ;;
+      5|vbem|em)                        name=vbem ;;
       *) echo "  ✗ enter 1, 2, 3, 4, or 5" >&2; continue ;;
     esac
     set_role_vars "$name"; break
   done
+fi
+# --disk-layout value sanity (applicability is enforced later, once the model is known).
+if [ -n "$NI_DISK" ] && [ "$NI_DISK" != "standard" ] && [ "$NI_DISK" != "single" ]; then
+  die "--disk-layout must be 'standard' or 'single' (got '$NI_DISK')"
 fi
 KSNAME=unattended-block.tmpl
 KS="$HERE/$KSNAME"
@@ -266,27 +280,18 @@ else
 fi
 jrec Info "Hostname prefix: $HOSTPREFIX"
 
-# ---- 1. veeamadmin password + MFA -------------------------------------------
+# ---- 1. veeamadmin password -------------------------------------------------
+# (veeamadmin MFA is decided in step 2b, AFTER the veeamso choice — see the MFA
+# invariant there: at least one account must carry MFA.)
 if [ "$NI" = 1 ]; then
   [ -n "$ADMIN_PW" ] || die "veeamadmin.password missing on stdin"
   validate_pw "$ADMIN_PW" "veeamadmin" || die "veeamadmin password fails the appliance policy"
-  if [ "$ROLE" = hardened-repo ]; then ADMIN_MFA_ENABLED=true
-  elif [ "$NI_ADMIN_MFA" = 1 ];  then ADMIN_MFA_ENABLED=true
-  else                                 ADMIN_MFA_ENABLED=false; fi
 else
   echo
   echo "Step 1 — veeamadmin password (15+ chars; upper, lower, digit, special; no dictionary words)"
   prompt_password "veeamadmin" ADMIN_PW
-  if [ "$ROLE" = hardened-repo ]; then
-    ADMIN_MFA_ENABLED=true
-    echo "  Hardened repository: MFA will be ENFORCED for veeamadmin (and veeamso)."
-  else
-    read -rp "  Enforce MFA on the veeamadmin account? [Y/N] (Default behavior is No) " m || die "input ended"
-    [[ "$m" =~ ^[Yy]$ ]] && ADMIN_MFA_ENABLED=true || ADMIN_MFA_ENABLED=false
-  fi
 fi
 jrec Info "veeamadmin.password = $KSLOG_MASK (set)"
-jrec Info "veeamadmin.isMfaEnabled: $ADMIN_MFA_ENABLED"
 
 # ---- 2. veeamso account: enabled? + password --------------------------------
 if [ "$NI" = 1 ]; then
@@ -316,6 +321,22 @@ else
 fi
 jrec Info "veeamso.isEnabled: $SO_ENABLED"
 [ "$SO_ENABLED" = true ] && jrec Info "veeamso.password = $KSLOG_MASK (set)" || true
+
+# ---- 2b. veeamadmin MFA — MFA invariant -------------------------------------
+# The appliance requires MFA on AT LEAST ONE account. An enabled veeamso always
+# enforces MFA, so veeamadmin MFA is a free choice when veeamso is enabled, but is
+# FORCED ON when veeamso is disabled (otherwise MFA would be nowhere). This applies
+# to every role (it replaces the old "hardened-repo forces MFA on both" shortcut).
+if [ "$SO_ENABLED" != true ]; then
+  ADMIN_MFA_ENABLED=true
+  [ "$NI" = 1 ] || echo "  veeamso is disabled → veeamadmin MFA is ENFORCED (at least one account must carry MFA)."
+elif [ "$NI" = 1 ]; then
+  [ "$NI_ADMIN_MFA" = 1 ] && ADMIN_MFA_ENABLED=true || ADMIN_MFA_ENABLED=false
+else
+  read -rp "  Enforce MFA on the veeamadmin account? [Y/N] (Default behavior is No) " m || die "input ended"
+  [[ "$m" =~ ^[Yy]$ ]] && ADMIN_MFA_ENABLED=true || ADMIN_MFA_ENABLED=false
+fi
+jrec Info "veeamadmin.isMfaEnabled: $ADMIN_MFA_ENABLED"
 
 # ---- 3. NTP -----------------------------------------------------------------
 if [ "$NI" = 1 ]; then
@@ -535,6 +556,7 @@ if [ $PREP_ONLY -eq 1 ]; then
   echo
   echo "$KSNAME is prepared (--prep-only set; build skipped)."
   echo "Build later on Linux:  ./build-appliance-iso.sh --role $ROLE --hostname-prefix $HOSTPREFIX ${CUSTOM_POST:+--custom-post $CUSTOM_POST }<source-iso>"
+  [ "$ROLE_FAMILY" = via ] && echo "  (for a 13.1+ VIA ISO, add --disk-layout standard|single — it is required there)"
   echo
   if [ "$NI" != 1 ]; then print_secrets; fi
   echo "Secrets saved to: $SECRETS_FILE"
@@ -543,28 +565,65 @@ fi
 
 echo
 echo "Building the golden ISO (role: $ROLE)..."
-jrec Info "Invoking build agent: $BUILD${LOG_DIR:+ (agent log -> $LOG_DIR/Agent.build-appliance.$ROLE.log)}"
-if [ -n "$SRC_ISO" ]; then
-  "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO" ${OUT_ISO:+"$OUT_ISO"}
-else
-  # Auto-detect the matching source ISO (role-specific) in this folder or ../ISO Archive.
+
+# Resolve the source ISO: explicit arg, else auto-detect by the role's ISO glob(s).
+if [ -z "$SRC_ISO" ]; then
   shopt -s nullglob
-  isos=( "$HERE"/$ISO_GLOB "$HERE/../ISO Archive"/$ISO_GLOB )
+  isos=()
+  for g in $ISO_GLOBS; do isos+=( "$HERE"/$g "$HERE/../ISO Archive"/$g ); done
   shopt -u nullglob
   if [ ${#isos[@]} -eq 1 ]; then
-    echo "Using detected source ISO: ${isos[0]}"
-    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "${isos[0]}"
+    SRC_ISO="${isos[0]}"; echo "Using detected source ISO: $SRC_ISO"
   elif [ ${#isos[@]} -gt 1 ]; then
     [ "$NI" = 1 ] && die "multiple matching ISOs in $HERE / ../ISO Archive — pass the source ISO path explicitly in non-interactive mode"
     echo "  Multiple matching ISOs detected:"; printf '    %s\n' "${isos[@]}"
     read -rp "  Path to source ISO: " SRC_ISO || die "input ended"
-    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO"
   else
-    [ "$NI" = 1 ] && die "no source ISO found (glob $ISO_GLOB in $HERE / ../ISO Archive) — pass the path explicitly in non-interactive mode"
-    read -rp "  Path to source ISO ($ISO_GLOB): " SRC_ISO || die "input ended"
-    "$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO"
+    [ "$NI" = 1 ] && die "no source ISO found (globs: $ISO_GLOBS in $HERE / ../ISO Archive) — pass the path explicitly in non-interactive mode"
+    read -rp "  Path to source ISO ($ISO_GLOBS): " SRC_ISO || die "input ended"
   fi
 fi
+[ -f "$SRC_ISO" ] || die "source ISO not found: $SRC_ISO"
+
+# ---- disk layout: REQUIRED for a consolidated (13.1+) VIA ISO, N/A otherwise --
+# Detect the build model from the ISO's STRUCTURE (mirrors build-appliance-iso.sh),
+# so the guided flow prompts for --disk-layout only when it applies and still works
+# for pre-13.1 (legacy) ISOs where disk topology isn't a menu choice.
+DISKOPT=()
+if [ "$ROLE_FAMILY" = via ]; then
+  command -v xorriso >/dev/null || die "xorriso is required to build (dnf/apt install xorriso)"
+  probe="$(mktemp -d)"
+  iso_has_ks() { rm -f "$probe/.p"; xorriso -osirrox on -indev "$SRC_ISO" -extract "/$1" "$probe/.p" >/dev/null 2>&1 && [ -s "$probe/.p" ]; }
+  if iso_has_ks "vmware-proxy-ks.cfg" || iso_has_ks "hardened-repo-ks.cfg"; then MODEL=legacy
+  elif iso_has_ks "proxy-ks.cfg"; then MODEL=consolidated
+  else rm -rf "$probe"; die "unrecognized VIA layout in $SRC_ISO — no vmware-proxy/hardened-repo/proxy kickstart at root (see internal/13.1.0.393-findings.md)"; fi
+  rm -rf "$probe"
+  if [ "$MODEL" = consolidated ]; then
+    if [ "$NI" = 1 ]; then
+      [ -n "$NI_DISK" ] || die "--disk-layout is REQUIRED (standard|single) for this 13.1+ VIA ISO"
+      DISK_LAYOUT="$NI_DISK"
+    else
+      echo
+      echo "Disk layout (this VIA build is 13.1+ — REQUIRED, no default):"
+      echo "   [1] standard  — multi-disk deployment"
+      echo "   [2] single    — single-disk (wipes everything on all devices)"
+      while true; do
+        read -rp "  Disk layout [1/2]: " d || die "input ended"
+        case "$d" in 1|standard) DISK_LAYOUT=standard; break ;; 2|single) DISK_LAYOUT=single; break ;; *) echo "  ✗ enter 1 or 2" >&2 ;; esac
+      done
+    fi
+    DISKOPT=(--disk-layout "$DISK_LAYOUT")
+    jrec Info "build model: consolidated VIA; disk-layout: $DISK_LAYOUT"
+  else
+    [ -n "$NI_DISK" ] && die "--disk-layout is not valid for this pre-13.1 (legacy) VIA ISO"
+    jrec Info "build model: legacy VIA (disk-layout N/A)"
+  fi
+else
+  [ -n "$NI_DISK" ] && die "--disk-layout applies only to VIA builds, not role '$ROLE'"
+fi
+
+jrec Info "Invoking build agent: $BUILD${LOG_DIR:+ (agent log -> $LOG_DIR/Agent.build-appliance.$ROLE.log)}"
+"$BUILD" --role "$ROLE" --hostname-prefix "$HOSTPREFIX" "${DISKOPT[@]}" "${CPOPT[@]}" "${NOLOGOPT[@]}" "$SRC_ISO" ${OUT_ISO:+"$OUT_ISO"}
 
 # Final output: secrets summary LAST, so it's easy to find after the build log.
 echo
