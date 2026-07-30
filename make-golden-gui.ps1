@@ -1057,13 +1057,19 @@ Set-FormFit
 
 # ---- field-rule helpers -----------------------------------------------------
 function Update-FormRules {
-    # MFA invariant: at least ONE account must carry MFA. An enabled veeamso ALWAYS
-    # enforces MFA, so veeamadmin MFA is the user's choice while veeamso is ON, but is
-    # FORCED ON + locked when veeamso is OFF (otherwise MFA would be nowhere). This runs
-    # on the veeamso toggle too, so unchecking veeamadmin MFA and THEN disabling veeamso
-    # re-locks veeamadmin MFA on. (Replaces the old "hardened-repo forces MFA on both".)
-    $soOn = $chkVeeamso.Checked
-    if ($soOn) {
+    # MFA invariant - HARDENED REPOSITORY ONLY. The platform's actual rule (verified in
+    # the 13.1 hostmanager binary, confirmed by Veeam PM): a Hardened Repository requires
+    # either a configured Security Officer OR veeamadmin with MFA enabled. An enabled
+    # veeamso always carries enforced MFA, so for hardened-repo: veeamso OFF => veeamadmin
+    # MFA is FORCED ON + locked. Every OTHER role has NO platform MFA requirement (13.1's
+    # own setup wizard allows veeamso off AND veeamadmin MFA off), so we leave the choice
+    # free there rather than being stricter than the appliance.
+    # Re-evaluated on the veeamso toggle AND the role dropdown, so both "uncheck admin MFA
+    # then disable veeamso" and "disable veeamso then switch role to hardened-repo"
+    # re-lock admin MFA on.
+    $soOn    = $chkVeeamso.Checked
+    $isHr    = ([string]$cboRole.SelectedItem -eq 'hardened-repo')
+    if ($soOn -or -not $isHr) {
         $chkAdminMfa.Enabled = $true
     } else {
         $chkAdminMfa.Checked = $true; $chkAdminMfa.Enabled = $false

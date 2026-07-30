@@ -7,8 +7,9 @@
 #   - select role: proxy | storage-proxy | hardened-repo (VIA ISO) | vsa | vbem (VSA ISO)
 #   - prompt for the veeamadmin password (hidden, confirmed, validated)
 #   - choose whether the veeamso (Security Officer) account is enabled
-#   - choose whether veeamadmin MFA is enforced — MFA invariant: at least one account
-#     must carry MFA, so veeamadmin MFA is FORCED ON when veeamso is disabled
+#   - choose whether veeamadmin MFA is enforced — for the hardened-repo role ONLY, the
+#     appliance requires MFA on veeamadmin or a configured veeamso, so veeamadmin MFA is
+#     FORCED ON when veeamso is disabled; other roles have no such requirement
 #   - for a consolidated 13.1+ VIA ISO: pick --disk-layout standard|single (REQUIRED)
 #   - prompt for the veeamso password (when enabled; must differ from veeamadmin)
 #   - prompt for the NTP server(s)
@@ -324,14 +325,19 @@ fi
 jrec Info "veeamso.isEnabled: $SO_ENABLED"
 [ "$SO_ENABLED" = true ] && jrec Info "veeamso.password = $KSLOG_MASK (set)" || true
 
-# ---- 2b. veeamadmin MFA — MFA invariant -------------------------------------
-# The appliance requires MFA on AT LEAST ONE account. An enabled veeamso always
-# enforces MFA, so veeamadmin MFA is a free choice when veeamso is enabled, but is
-# FORCED ON when veeamso is disabled (otherwise MFA would be nowhere). This applies
-# to every role (it replaces the old "hardened-repo forces MFA on both" shortcut).
-if [ "$SO_ENABLED" != true ]; then
+# ---- 2b. veeamadmin MFA — MFA invariant (hardened-repo only) -----------------
+# The platform's ACTUAL rule (verified in the 13.1 hostmanager binary, confirmed by
+# Veeam PM) applies to the HARDENED REPOSITORY role only: an HR "requires either a
+# configured Security Officer or veeamadmin with MFA enabled". An enabled veeamso
+# always carries enforced MFA, so for hardened-repo: veeamso disabled => veeamadmin
+# MFA is FORCED ON.
+# Every OTHER role has no platform MFA requirement — 13.1's own setup wizard lets you
+# disable veeamso AND leave veeamadmin MFA off — so we do NOT force it there. Being
+# stricter than the platform would block legitimate no-MFA builds (e.g. a %post that
+# authenticates to the VBR API, which can't pass an MFA challenge).
+if [ "$SO_ENABLED" != true ] && [ "$ROLE" = hardened-repo ]; then
   ADMIN_MFA_ENABLED=true
-  [ "$NI" = 1 ] || echo "  veeamso is disabled → veeamadmin MFA is ENFORCED (at least one account must carry MFA)."
+  [ "$NI" = 1 ] || echo "  hardened-repo with veeamso disabled → veeamadmin MFA is ENFORCED (the appliance requires MFA on one of them)."
 elif [ "$NI" = 1 ]; then
   [ "$NI_ADMIN_MFA" = 1 ] && ADMIN_MFA_ENABLED=true || ADMIN_MFA_ENABLED=false
 else

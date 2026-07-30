@@ -255,8 +255,8 @@ fi
 # hand-filled (standalone-path) block can't ship an ISO the appliance rejects at
 # first boot: 15+ chars, all 4 classes, no >4 same-class / no >3 identical in a row, and
 # veeamadmin != veeamso. (veeamso checked only when its account is enabled.)
-python3 - "$BLOCK_FILE" <<'PY' || die "credentials fail the appliance password policy — fix the block and rebuild"
-import sys, re
+ROLE="$ROLE" python3 - "$BLOCK_FILE" <<'PY' || die "credentials fail the appliance password policy — fix the block and rebuild"
+import sys, re, os
 ks = open(sys.argv[1]).read()
 def get(k):
     m = re.search(r'^%s=(.*)$' % re.escape(k), ks, re.M)
@@ -283,14 +283,22 @@ if get("veeamso.isEnabled") == "true":
     problems += check(so, "veeamso")
     if admin is not None and so == admin:
         problems.append("veeamadmin and veeamso passwords must differ")
-# MFA invariant: at least one account must carry MFA. An enabled veeamso always
-# enforces MFA, so if veeamso is DISABLED then veeamadmin MFA must be ON (else MFA
-# is nowhere). Backstop for the scriptable/hand-filled path; the guided builder and
-# GUI enforce the same rule in their UI. (Replaces the old "force MFA on both for
-# hardened-repo" oversimplification.)
-if get("veeamso.isEnabled") != "true" and get("veeamadmin.isMfaEnabled") != "true":
-    problems.append("MFA must be enabled on at least one account: veeamso is disabled, "
-                    "so veeamadmin.isMfaEnabled must be true")
+# MFA invariant — HARDENED REPOSITORY ONLY. The appliance's actual rule, verified in
+# the 13.1 hostmanager binary and confirmed by Veeam PM:
+#   "A Veeam Hardened Repository requires either a configured Security Officer or
+#    veeamadmin with MFA enabled."
+# An enabled veeamso always carries enforced MFA, so for hardened-repo the rule reduces
+# to: veeamso disabled => veeamadmin.isMfaEnabled must be true.
+# It is scoped to hardened-repo ON PURPOSE. Other roles (proxy/storage-proxy/vsa/vbem)
+# have NO platform MFA requirement — 13.1's own setup wizard lets you disable veeamso
+# AND leave veeamadmin MFA off on those — so forcing MFA there would be stricter than
+# the product and would block legitimate no-MFA deployments (e.g. an unattended
+# %post that authenticates to the VBR API, which cannot pass an MFA challenge).
+# Backstop for the scriptable/hand-filled path; the guided builder and GUI mirror it.
+if os.environ.get("ROLE") == "hardened-repo" \
+   and get("veeamso.isEnabled") != "true" and get("veeamadmin.isMfaEnabled") != "true":
+    problems.append("hardened-repo requires MFA somewhere: veeamso is disabled, so "
+                    "veeamadmin.isMfaEnabled must be true")
 if problems:
     sys.stderr.write("Password policy violations:\n")
     for p in problems: sys.stderr.write("  - %s\n" % p)
