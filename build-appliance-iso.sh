@@ -186,7 +186,7 @@ elif iso_has "vmware-proxy-ks.cfg" || iso_has "hardened-repo-ks.cfg"; then
 elif iso_has "proxy-ks.cfg"; then
   MODEL="consolidated"
 else
-  die "unrecognized VIA layout: ISO has no vmware-proxy/hardened-repo/proxy kickstart at root — stock layout changed; the tool needs updating (see internal/13.1.0.393-findings.md)"
+  die "unrecognized VIA layout: ISO has no vmware-proxy/hardened-repo/proxy kickstart at root — this build of the appliance ISO is newer than this kit; use a supported ISO or update the kit"
 fi
 rm -f "$WORK/.probe"
 alog init "Detected build model: $MODEL"

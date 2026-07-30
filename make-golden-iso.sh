@@ -103,8 +103,10 @@ on_exit() {
 trap on_exit EXIT
 
 # Role name -> per-role settings (interactive menu + non-interactive both use this).
-# ISO_GLOBS may hold >1 space-separated pattern (the VIA/JEOS ISO was renamed from
-# VeeamInfrastructureAppliance* to VeeamJEOS* in 13.1, so VIA roles match both).
+# ISO_GLOBS may hold >1 space-separated pattern: the VIA ISO shipped as VeeamJEOS* in
+# the 13.1 pre-GA dev builds and as VeeamInfrastructureAppliance* in 13.0 and again at
+# 13.1 GA (verified on 13.1.0.411), so VIA roles match BOTH names. Filename is a
+# convenience for auto-detect only — the build model is detected from ISO STRUCTURE.
 # ROLE_FAMILY (via|vsa) drives model detection + whether --disk-layout applies.
 set_role_vars() {  # $1 = role name; sets ROLE/ROLE_FAMILY/ISO_GLOBS/DEF_PREFIX; returns 1 if unknown
   # 'vmware-proxy' is a deprecated alias for 'storage-proxy'.
@@ -596,7 +598,7 @@ if [ "$ROLE_FAMILY" = via ]; then
   iso_has_ks() { rm -f "$probe/.p"; xorriso -osirrox on -indev "$SRC_ISO" -extract "/$1" "$probe/.p" >/dev/null 2>&1 && [ -s "$probe/.p" ]; }
   if iso_has_ks "vmware-proxy-ks.cfg" || iso_has_ks "hardened-repo-ks.cfg"; then MODEL=legacy
   elif iso_has_ks "proxy-ks.cfg"; then MODEL=consolidated
-  else rm -rf "$probe"; die "unrecognized VIA layout in $SRC_ISO — no vmware-proxy/hardened-repo/proxy kickstart at root (see internal/13.1.0.393-findings.md)"; fi
+  else rm -rf "$probe"; die "unrecognized VIA layout in $SRC_ISO — no vmware-proxy/hardened-repo/proxy kickstart at its root. This build of the appliance ISO is newer than this kit; use a supported ISO or update the kit."; fi
   rm -rf "$probe"
   if [ "$MODEL" = consolidated ]; then
     if [ "$NI" = 1 ]; then
