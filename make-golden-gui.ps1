@@ -182,8 +182,29 @@ $TransportScript = {
     # Transport log (Veeam job-style, FILE-ONLY). NEVER receives a secret.
     function Write-TLog {
         param([string]$Level = 'Info', [Parameter(Mandatory)][string]$Msg)
+        if (-not $script:TLog) { return }
         $line = "[{0}]    <{1}>    {2,-7}    {3}" -f (Get-Date -Format "dd.MM.yyyy HH:mm:ss.fff"), $PID, $Level, $Msg
-        try { Add-Content -LiteralPath $script:TLog -Value $line } catch { }
+        # Logging must NEVER interfere with the build, and must never spam the operator.
+        # Two hazards this guards against, both seen for real on 2026-07-30:
+        #  1. Add-Content raises a NON-TERMINATING error, which try/catch does NOT catch -
+        #     it lands on the Error stream instead, and the GUI drains that stream into the
+        #     log pane. One missing directory therefore printed 7 scary "ERROR:" lines on a
+        #     build that actually SUCCEEDED. -ErrorAction Stop makes it catchable.
+        #  2. The log directory can go missing mid-run (observed; cause not yet established).
+        #     So re-create it on demand rather than trusting the one New-Item at startup.
+        try {
+            $d = Split-Path -Parent $script:TLog
+            if ($d -and -not (Test-Path -LiteralPath $d)) {
+                New-Item -ItemType Directory -Force -Path $d -ErrorAction Stop | Out-Null
+            }
+            Add-Content -LiteralPath $script:TLog -Value $line -ErrorAction Stop
+        } catch {
+            # Last resort: note it ONCE on the console, never on the Error stream, then go quiet.
+            if (-not $script:TLogBroken) {
+                $script:TLogBroken = $true
+                Write-Host "NOTE: transport log unavailable ($($_.Exception.Message)) - the build continues; per-run build logs are unaffected."
+            }
+        }
     }
 
     # Retry wrapper for non-interactive ssh/scp steps (not the build itself).
