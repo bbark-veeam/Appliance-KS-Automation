@@ -11,29 +11,37 @@ time the tool extracts the stock kickstart from *your* Veeam ISO and inserts the
 unattended settings into it — nothing build-specific is shipped.
 
 For **large-scale (mass) deployment** — one golden ISO provisions many identical
-appliances. You pick the **role** at build time (which stock kickstart is pulled
-from the ISO):
-- **proxy** — VIA generic backup proxy ("Veeam Infrastructure Appliance",
-  `VARIANT_ID=vbproxy`); uses the **VIA** ISO's `proxy-ks.cfg`.
-- **vmware-proxy** — VIA VMware backup proxy with **iSCSI & NVMe/TCP** storage
-  connectivity (the "Veeam Infrastructure Appliance (with iSCSI & NVMe/TCP)"
-  variant); uses the **VIA** ISO's `vmware-proxy-ks.cfg`.
-- **hardened-repo** — VIA Veeam Hardened Repository (`VARIANT_ID=veeam-lhr`); uses
-  the **VIA** ISO's `hardened-repo-ks.cfg`. **Forces MFA on BOTH veeamadmin and veeamso.**
-- **vsa** — Veeam Backup & Replication server ("Veeam Software Appliance",
-  `VARIANT_ID=vbr`); uses the **VSA** ISO's `vbr-ks.cfg`.
-- **vbem** — Veeam Backup Enterprise Manager; uses the **VSA** ISO's `vbem-ks.cfg`.
+appliances. You pick the **role** at build time:
+- **proxy** — VIA generic backup proxy (`VARIANT_ID=vbproxy`).
+- **storage-proxy** — VIA backup proxy prepped for **direct storage access
+  (iSCSI/NVMe-TCP)** (`VARIANT_ID=vbproxy` + iSCSI). Formerly `vmware-proxy`, which
+  still works as a **deprecated alias**.
+- **hardened-repo** — VIA Veeam Hardened Repository (`VARIANT_ID=veeam-lhr`).
+- **vsa** — Veeam Backup & Replication server (`VARIANT_ID=vbr`); **VSA** ISO's `vbr-ks.cfg`.
+- **vbem** — Veeam Backup Enterprise Manager; **VSA** ISO's `vbem-ks.cfg`.
 
 `make-golden-iso.sh` prompts for the role; the standalone scripts take
-`--role proxy|vmware-proxy|hardened-repo|vsa|vbem`. Each role uses its matching
-**source ISO** (the Veeam Infrastructure Appliance ISO for
-proxy/vmware-proxy/hardened-repo, the Veeam Software Appliance ISO for vsa/vbem).
+`--role proxy|storage-proxy|hardened-repo|vsa|vbem`. Each role uses its matching
+**source ISO** (the Veeam Infrastructure Appliance / JEOS ISO for
+proxy/storage-proxy/hardened-repo, the Veeam Software Appliance ISO for vsa/vbem).
 Two further options apply to any role: you can **supply
 your own MFA keys / SO recovery token** (instead of auto-generating), and you can
 **enable or disable the veeamso account** (`veeamso.isEnabled`).
 
-> The VSA ISO also carries `vbem-ks.cfg` (Enterprise Manager) behind a "Veeam
-> Backup Enterprise Manager" submenu — a possible future role.
+### Two VIA build models (13.0 vs 13.1+) — auto-detected
+
+The kit detects, from the **source ISO's structure**, which appliance generation you
+fed it and handles each correctly (both are fully supported):
+- **13.0 (legacy):** each VIA role ships its own kickstart (`proxy` / `vmware-proxy` /
+  `hardened-repo-ks.cfg`) selected by a role-named boot menu. Unchanged behavior.
+- **13.1+ (consolidated):** the VIA/JEOS ISO carries **one `proxy-ks.cfg`**; the role is
+  applied at **first boot** via `applianceRole.role` + `applianceRole.iSCSI` in
+  `vbr_init.cfg`, and the boot menu is **disk-topology**, not role. For these ISOs you
+  **must** pass **`--disk-layout standard|single`** (Standard multi-disk vs Single-disk) —
+  it is required (no default) and rejected for 13.0 VIA / any VSA build. You still pick the
+  same `--role`; the kit writes it into `applianceRole.*` for you.
+
+VSA (`vsa`/`vbem`) is a separate ISO/product and is identical across 13.0/13.1.
 
 ## Verify your download
 
@@ -161,8 +169,11 @@ on Linux/`xorriso` — this is just an orchestrator, not a Windows reimplementat
 host's login user must be **root or able to `sudo`** (the build loop-mounts the UEFI image).
 
 ## Configuration model
-- **Role:** `proxy` | `vmware-proxy` | `hardened-repo` | `vsa` | `vbem`, chosen at
-  build time (see top of this doc).
+- **Role:** `proxy` | `storage-proxy` | `hardened-repo` | `vsa` | `vbem`, chosen at
+  build time (see top of this doc). `vmware-proxy` is a deprecated alias for `storage-proxy`.
+- **Disk layout (13.1+ VIA only):** `--disk-layout standard|single` — **required** for a
+  consolidated 13.1+ VIA ISO, rejected for 13.0 VIA / any VSA build (see "Two VIA build
+  models" above).
 - **Secret keys (MFA + SO recovery token):** generated **fresh per build by
   default** (cryptographically random), via `generate-secrets.sh` (or
   `make-golden-iso.sh`) — the kit ships placeholders, not preset keys. **Or supply
@@ -179,10 +190,14 @@ host's login user must be **root or able to `sudo`** (the build loop-mounts the 
 - **Passwords:** you supply the two account passwords (must differ; STIG-compliant).
 - **Scope:** one golden ISO, shared credentials across all appliances in a deployment.
 - **MFA:**
-  - `veeamso` — enforced when the account is enabled (Veeam default).
-  - `veeamadmin` — enforced **always** for `hardened-repo`; a Y/N choice for
-    `proxy`/`vsa` (default off). Its key is generated either way so MFA can be
-    turned on later if left off.
+  - `veeamso` — enforced whenever the account is enabled (appliance default; not optional).
+  - `veeamadmin` — your Y/N choice (default off). The key is generated either way, so MFA
+    can be enabled later even if you leave it off at build time.
+  - **One exception, for the `hardened-repo` role only:** a Veeam Hardened Repository
+    requires MFA on either a configured Security Officer **or** `veeamadmin`. So for
+    `hardened-repo`, disabling `veeamso` **forces `veeamadmin` MFA on** (the GUI locks the
+    checkbox). Other roles have no such requirement — you may disable `veeamso` and leave
+    `veeamadmin` MFA off, exactly as the appliance's own setup wizard allows.
 - **veeamso account:** enabled by default; `make-golden-iso.sh` can **disable** it
   (`veeamso.isEnabled=false`) — mirrors the GUI's "enable Security Officer" choice.
 - **Hostname:** you choose a prefix; each appliance gets `<prefix>-<unique-hash>`
@@ -264,7 +279,7 @@ it. **Steps 1–4 run on a Linux box** (or WSL2 / a Linux container) — see the
 > one machine, build on Linux later). On a **Windows** box with a separate Linux build host,
 > **`make-golden-remote.ps1`** drives this whole flow remotely (see "Building on Windows via a
 > remote Linux host"). The numbered steps below document exactly what the guided script does —
-> follow them manually (with `--role proxy|vmware-proxy|hardened-repo|vsa|vbem` on the standalone scripts) if you
+> follow them manually (with `--role proxy|storage-proxy|hardened-repo|vsa|vbem` on the standalone scripts) if you
 > prefer granular control or an automated pipeline.
 
 > You fill **one** file for every role — `unattended-block.tmpl`. The build pulls

@@ -5,15 +5,23 @@
 # =============================================================================
 # Produces ONE golden ISO for large-scale deployment (shared creds across all
 # appliances provisioned from it). Supports five roles:
-#   --role proxy           -> generic backup proxy        (VIA ISO, proxy-ks.cfg)
-#   --role vmware-proxy    -> VMware proxy, iSCSI/NVMe-TCP (VIA ISO, vmware-proxy-ks.cfg)
-#   --role hardened-repo   -> Veeam Hardened Repository    (VIA ISO, hardened-repo-ks.cfg)
-#   --role vsa             -> Veeam Backup & Replication   (VSA ISO, vbr-ks.cfg)
-#   --role vbem            -> Enterprise Manager           (VSA ISO, vbem-ks.cfg)
+#   --role proxy           -> generic backup proxy          (VIA ISO)
+#   --role storage-proxy   -> proxy, direct storage prep    (VIA ISO; iSCSI/NVMe-TCP)
+#   --role hardened-repo   -> Veeam Hardened Repository      (VIA ISO)
+#   --role vsa             -> Veeam Backup & Replication     (VSA ISO, vbr-ks.cfg)
+#   --role vbem            -> Enterprise Manager             (VSA ISO, vbem-ks.cfg)
+# ('vmware-proxy' is accepted as a deprecated alias for 'storage-proxy'.)
 #
-# Pass the matching SOURCE ISO: the Veeam Infrastructure Appliance ISO for
-# proxy/vmware-proxy/hardened-repo, or the Veeam Software Appliance ISO for
-# vsa/vbem.
+# Pass the matching SOURCE ISO: the Veeam Infrastructure Appliance / JEOS ISO for
+# proxy/storage-proxy/hardened-repo, or the Veeam Software Appliance ISO for vsa/vbem.
+#
+# TWO VIA BUILD MODELS, auto-detected from the ISO's structure (not its version):
+#   * legacy  (pre-13.1): each VIA role ships its own kickstart (proxy/vmware-proxy/
+#     hardened-repo-ks.cfg), selected by a role-named grub submenu.
+#   * consolidated (13.1+): ONE JEOS install (proxy-ks.cfg); the role is chosen at
+#     FIRST BOOT via applianceRole.* in vbr_init.cfg, and grub is disk-topology
+#     (Standard multi-disk / Single-disk) — so --disk-layout is REQUIRED there.
+# VSA (vsa/vbem) is unchanged across both and never branches on model.
 #
 # VERSION-AGNOSTIC BY DESIGN. Nothing build-specific is shipped. At build time
 # this script, for the chosen role:
@@ -62,6 +70,7 @@ die() { alog error "$*" >&2; exit 1; }
 
 # ---- arguments --------------------------------------------------------------
 ROLE="proxy"
+DISK_LAYOUT=""                             # standard|single — REQUIRED for consolidated (13.1+) VIA; N/A otherwise
 BLOCK_FILE="$HERE/unattended-block.tmpl"   # the (filled) unattended block to insert
 HOST_PREFIX=""                             # empty => keep the stock per-role hostname prefix
 EMIT_KS=""                                 # optional path to also write the derived ks (SENSITIVE)
@@ -72,6 +81,7 @@ for a in "$@"; do
   if [ -n "$NEXT" ]; then
     case "$NEXT" in
       role)   ROLE="$a" ;;
+      disk)   DISK_LAYOUT="$a" ;;
       block)  BLOCK_FILE="$a" ;;
       prefix) HOST_PREFIX="$a" ;;
       emit)   EMIT_KS="$a" ;;
@@ -83,6 +93,8 @@ for a in "$@"; do
   case "$a" in
     --role)              NEXT=role ;;
     --role=*)            ROLE="${a#*=}" ;;
+    --disk-layout)       NEXT=disk ;;
+    --disk-layout=*)     DISK_LAYOUT="${a#*=}" ;;
     --block)             NEXT=block ;;
     --block=*)           BLOCK_FILE="${a#*=}" ;;
     --hostname-prefix)   NEXT=prefix ;;
@@ -100,52 +112,33 @@ done
 SRC_ISO="${ARGS[0]:-}"
 OUT_ISO="${ARGS[1]:-}"
 
-# ---- role-specific settings -------------------------------------------------
-# INSTALL_ENTRY is the grub "fresh install" menu-entry text. It is identical for
-# every role EXCEPT vbem, whose entry omits the "(including local backups)" suffix
-# (Enterprise Manager keeps no local backups). The grub default is built as
-# "<submenu>><entry>", so a wrong entry string points the default at a missing
-# menu node — hence it is tracked per role.
-INSTALL_ENTRY="Install - fresh install, wipes everything (including local backups)"
+# ---- role: normalize + determine family -------------------------------------
+# 'vmware-proxy' was the pre-13.1 name for the storage-prepped proxy; accept it as
+# a deprecated alias for 'storage-proxy' (same appliance role — iSCSI/NVMe-TCP prep).
+DEPRECATED_ROLE=""
+if [ "$ROLE" = "vmware-proxy" ]; then DEPRECATED_ROLE="vmware-proxy"; ROLE="storage-proxy"; fi
 case "$ROLE" in
-  proxy)
-    STOCK_KS="proxy-ks.cfg"
-    GRUB_SUBMENU="Veeam Infrastructure Appliance"
-    ROLE_TAG="PROXY" ;;
-  vmware-proxy)
-    # VIA VMware backup proxy with iSCSI & NVMe/TCP storage connectivity.
-    STOCK_KS="vmware-proxy-ks.cfg"
-    GRUB_SUBMENU="Veeam Infrastructure Appliance (with iSCSI & NVMe/TCP)"
-    ROLE_TAG="VMWAREPROXY" ;;
-  hardened-repo)
-    STOCK_KS="hardened-repo-ks.cfg"
-    GRUB_SUBMENU="Veeam Hardened Repository"
-    ROLE_TAG="HARDENEDREPO" ;;
-  vsa)
-    STOCK_KS="vbr-ks.cfg"
-    GRUB_SUBMENU="Veeam Backup & Replication"
-    ROLE_TAG="VSA" ;;
-  vbem)
-    # VSA Veeam Backup Enterprise Manager — distinct install-entry text (no suffix).
-    STOCK_KS="vbem-ks.cfg"
-    GRUB_SUBMENU="Veeam Backup Enterprise Manager"
-    INSTALL_ENTRY="Install - fresh install, wipes everything"
-    ROLE_TAG="VBEM" ;;
-  *) die "unknown --role '$ROLE' (use: proxy | vmware-proxy | hardened-repo | vsa | vbem)" ;;
+  proxy|storage-proxy|hardened-repo) ROLE_FAMILY="via" ;;
+  vsa|vbem)                          ROLE_FAMILY="vsa" ;;
+  *) die "unknown --role '$ROLE' (use: proxy | storage-proxy | hardened-repo | vsa | vbem)" ;;
 esac
-KS_ISO_PATH="/$STOCK_KS"          # path of the stock kickstart inside the ISO
-GRUB_DEFAULT="${GRUB_SUBMENU}>${INSTALL_ENTRY}"
 
-[[ -n "$SRC_ISO" ]] || die "usage: $0 [--role proxy|vmware-proxy|hardened-repo|vsa|vbem] [--hostname-prefix P] [--block FILE] [--custom-post FILE] [--emit-ks FILE] [--log FILE|--no-log] <source-iso> [output-iso]"
+USAGE="usage: $0 [--role proxy|storage-proxy|hardened-repo|vsa|vbem] [--disk-layout standard|single] [--hostname-prefix P] [--block FILE] [--custom-post FILE] [--emit-ks FILE] [--log FILE|--no-log] <source-iso> [output-iso]"
+[[ -n "$SRC_ISO" ]] || die "$USAGE"
 [[ -f "$SRC_ISO" ]] || die "source ISO not found: $SRC_ISO"
 [[ -f "$BLOCK_FILE" ]] || die "unattended block template not found: $BLOCK_FILE"
 [[ -z "$CUSTOM_POST" || -f "$CUSTOM_POST" ]] || die "custom %post file not found: $CUSTOM_POST"
+if [ -n "$DISK_LAYOUT" ] && [ "$DISK_LAYOUT" != "standard" ] && [ "$DISK_LAYOUT" != "single" ]; then
+  die "--disk-layout must be 'standard' or 'single' (got '$DISK_LAYOUT')"
+fi
 
-# Output name derives from the SOURCE ISO (so it carries the actual build/version,
-# whatever it is) + the role tag — version-agnostic and accurate.
-OUT_ISO="${OUT_ISO:-$HERE/$(basename "$SRC_ISO" .iso)_${ROLE_TAG}_UNATTENDED.iso}"
+command -v xorriso >/dev/null || die "xorriso not installed (dnf/apt install xorriso)"
+command -v python3 >/dev/null || die "python3 not installed"
+if ! { [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null || command -v mcopy >/dev/null; }; then
+  die "to patch efiboot.img, run this as root (loop-mount), or install mtools (dnf/apt install mtools)"
+fi
 
-# ---- build log (Veeam agent format; always-on, --no-log to disable) ---------
+# ---- cleanup/logging state, workdir (created early so detection can probe) --
 # This worker prints NO secrets — passwords/keys/token live only in the block file
 # and (in make-golden) the secrets summary, neither of which this script echoes —
 # so capturing all of its output here is safe. When invoked by make-golden, it
@@ -160,6 +153,8 @@ on_exit() {
   if [ -n "${TEE_PID:-}" ]; then exec >&- 2>&- || true; wait "$TEE_PID" 2>/dev/null || true; fi
 }
 trap on_exit EXIT
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+WORK="$(mktemp -d)"
 
 if [ -z "$NO_LOG" ]; then
   RUN_ID="$(kslog_runid "$ROLE")"
@@ -172,16 +167,80 @@ if [ -z "$NO_LOG" ]; then
   alog init "Build log: $LOG_FILE"
 fi
 alog init "Role: $ROLE"
+[ -n "$DEPRECATED_ROLE" ] && alog warn "role '$DEPRECATED_ROLE' is deprecated; treating it as 'storage-proxy'"
 alog init "Source ISO: $SRC_ISO"
-alog init "Output ISO: $OUT_ISO"
 alog init "Hostname prefix: ${HOST_PREFIX:-<keep stock>}"
 [ -n "$CUSTOM_POST" ] && alog init "Custom %post: $CUSTOM_POST (UNSUPPORTED, inserted verbatim)"
 
-command -v xorriso >/dev/null || die "xorriso not installed (dnf/apt install xorriso)"
-command -v python3 >/dev/null || die "python3 not installed"
-if ! { [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null || command -v mcopy >/dev/null; }; then
-  die "to patch efiboot.img, run this as root (loop-mount), or install mtools (dnf/apt install mtools)"
+# ---- detect the appliance build MODEL from the ISO (STRUCTURE, not version) --
+# We key off which kickstarts the ISO actually carries — so a relabeled/dev build
+# can't fool a version-number gate. BUILD_ID (parsed later, for the log) only
+# corroborates. VSA (vsa/vbem) is single-path and never branches.
+#   legacy       (pre-13.1 VIA): per-role kickstarts (vmware-proxy/hardened-repo-ks.cfg)
+#   consolidated (13.1+ VIA):    ONE proxy-ks.cfg; role via applianceRole.* at first boot
+iso_has() { rm -f "$WORK/.probe"; xorriso -osirrox on -indev "$SRC_ISO" -extract "/$1" "$WORK/.probe" >/dev/null 2>&1 && [ -s "$WORK/.probe" ]; }
+if [ "$ROLE_FAMILY" = "vsa" ]; then
+  MODEL="vsa"
+elif iso_has "vmware-proxy-ks.cfg" || iso_has "hardened-repo-ks.cfg"; then
+  MODEL="legacy"
+elif iso_has "proxy-ks.cfg"; then
+  MODEL="consolidated"
+else
+  die "unrecognized VIA layout: ISO has no vmware-proxy/hardened-repo/proxy kickstart at root — this build of the appliance ISO is newer than this kit; use a supported ISO or update the kit"
 fi
+rm -f "$WORK/.probe"
+alog init "Detected build model: $MODEL"
+
+# ---- resolve role + model -> kickstart, grub target, applianceRole, tag -----
+# GRUB_DEFAULT is "<submenu>><entry>"; a wrong string points the default at a
+# missing menu node, so both are tracked. GRUB_EXTRA is the extra kernel-cmdline
+# token (before ' quiet') that uniquely identifies the target Install entry.
+INSTALL_ENTRY="Install - fresh install, wipes everything (including local backups)"
+GRUB_EXTRA=""
+APPLIANCE_ROLE=""            # non-empty => inject applianceRole.* into vbr_init.cfg (consolidated VIA)
+APPLIANCE_ISCSI=""
+DISK_TAG=""
+if [ "$MODEL" = "vsa" ]; then
+  [ -z "$DISK_LAYOUT" ] || die "--disk-layout applies only to a 13.1+ VIA build; it is not valid for role '$ROLE'"
+  case "$ROLE" in
+    vsa)  STOCK_KS="vbr-ks.cfg";  GRUB_SUBMENU="Veeam Backup & Replication";       ROLE_TAG="VSA" ;;
+    vbem) STOCK_KS="vbem-ks.cfg"; GRUB_SUBMENU="Veeam Backup Enterprise Manager"
+          INSTALL_ENTRY="Install - fresh install, wipes everything";              ROLE_TAG="VBEM" ;;
+  esac
+elif [ "$MODEL" = "legacy" ]; then
+  [ -z "$DISK_LAYOUT" ] || die "--disk-layout applies only to a 13.1+ VIA build; this ISO is the pre-13.1 per-role layout"
+  case "$ROLE" in
+    proxy)         STOCK_KS="proxy-ks.cfg";        GRUB_SUBMENU="Veeam Infrastructure Appliance";                         ROLE_TAG="PROXY" ;;
+    storage-proxy) STOCK_KS="vmware-proxy-ks.cfg"; GRUB_SUBMENU="Veeam Infrastructure Appliance (with iSCSI & NVMe/TCP)"; ROLE_TAG="STORAGEPROXY" ;;
+    hardened-repo) STOCK_KS="hardened-repo-ks.cfg";GRUB_SUBMENU="Veeam Hardened Repository";                              ROLE_TAG="HARDENEDREPO" ;;
+  esac
+else   # consolidated (13.1+ VIA): one JEOS install; role via applianceRole.*; grub is disk-topology
+  [ -n "$DISK_LAYOUT" ] || die "--disk-layout is REQUIRED for a 13.1+ VIA build (standard|single) — there is no default"
+  STOCK_KS="proxy-ks.cfg"
+  case "$ROLE" in
+    proxy)         APPLIANCE_ROLE="vbproxy";   APPLIANCE_ISCSI="false"; ROLE_TAG="PROXY" ;;
+    storage-proxy) APPLIANCE_ROLE="vbproxy";   APPLIANCE_ISCSI="true";  ROLE_TAG="STORAGEPROXY" ;;
+    hardened-repo) APPLIANCE_ROLE="veeam-lhr"; APPLIANCE_ISCSI="false"; ROLE_TAG="HARDENEDREPO" ;;
+  esac
+  if [ "$DISK_LAYOUT" = "single" ]; then
+    GRUB_SUBMENU="Single-Disk Deployment"
+    INSTALL_ENTRY="Install - fresh install, wipes everything on all devices"
+    GRUB_EXTRA=" inst.vsingledisk"
+    DISK_TAG="_SINGLEDISK"
+  else
+    GRUB_SUBMENU="Standard (Multi-Disk) Deployment"
+    DISK_TAG="_MULTIDISK"
+  fi
+  alog init "VIA role -> applianceRole.role=$APPLIANCE_ROLE applianceRole.iSCSI=$APPLIANCE_ISCSI ; disk-layout=$DISK_LAYOUT"
+fi
+ROLE_TAG="${ROLE_TAG}${DISK_TAG}"
+KS_ISO_PATH="/$STOCK_KS"          # path of the stock kickstart inside the ISO
+GRUB_DEFAULT="${GRUB_SUBMENU}>${INSTALL_ENTRY}"
+
+# Output name derives from the SOURCE ISO (so it carries the actual build/version,
+# whatever it is) + the role tag — version-agnostic and accurate.
+OUT_ISO="${OUT_ISO:-$HERE/$(basename "$SRC_ISO" .iso)_${ROLE_TAG}_UNATTENDED.iso}"
+alog init "Output ISO: $OUT_ISO"
 
 # ---- validate the FILLED block template (fast-fail before touching the ISO) --
 # Refuse to build while real placeholder tokens remain (<<SET_FOO>>/<<GENERATE_FOO>>),
@@ -196,8 +255,8 @@ fi
 # hand-filled (standalone-path) block can't ship an ISO the appliance rejects at
 # first boot: 15+ chars, all 4 classes, no >4 same-class / no >3 identical in a row, and
 # veeamadmin != veeamso. (veeamso checked only when its account is enabled.)
-python3 - "$BLOCK_FILE" <<'PY' || die "credentials fail the appliance password policy — fix the block and rebuild"
-import sys, re
+ROLE="$ROLE" python3 - "$BLOCK_FILE" <<'PY' || die "credentials fail the appliance password policy — fix the block and rebuild"
+import sys, re, os
 ks = open(sys.argv[1]).read()
 def get(k):
     m = re.search(r'^%s=(.*)$' % re.escape(k), ks, re.M)
@@ -224,6 +283,22 @@ if get("veeamso.isEnabled") == "true":
     problems += check(so, "veeamso")
     if admin is not None and so == admin:
         problems.append("veeamadmin and veeamso passwords must differ")
+# MFA invariant — HARDENED REPOSITORY ONLY. The appliance's actual rule, verified in
+# the 13.1 hostmanager binary and confirmed by Veeam PM:
+#   "A Veeam Hardened Repository requires either a configured Security Officer or
+#    veeamadmin with MFA enabled."
+# An enabled veeamso always carries enforced MFA, so for hardened-repo the rule reduces
+# to: veeamso disabled => veeamadmin.isMfaEnabled must be true.
+# It is scoped to hardened-repo ON PURPOSE. Other roles (proxy/storage-proxy/vsa/vbem)
+# have NO platform MFA requirement — 13.1's own setup wizard lets you disable veeamso
+# AND leave veeamadmin MFA off on those — so forcing MFA there would be stricter than
+# the product and would block legitimate no-MFA deployments (e.g. an unattended
+# %post that authenticates to the VBR API, which cannot pass an MFA challenge).
+# Backstop for the scriptable/hand-filled path; the guided builder and GUI mirror it.
+if os.environ.get("ROLE") == "hardened-repo" \
+   and get("veeamso.isEnabled") != "true" and get("veeamadmin.isMfaEnabled") != "true":
+    problems.append("hardened-repo requires MFA somewhere: veeamso is disabled, so "
+                    "veeamadmin.isMfaEnabled must be true")
 if problems:
     sys.stderr.write("Password policy violations:\n")
     for p in problems: sys.stderr.write("  - %s\n" % p)
@@ -241,9 +316,8 @@ if [ -n "$CUSTOM_POST" ] && grep -qE '^veeamadmin\.isMfaEnabled=true' "$BLOCK_FI
   alog warn "MFA disabled (enable it after), or have the snippet compute the TOTP from the baked-in secret."
 fi
 
-if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
-WORK="$(mktemp -d)"
-# (cleanup + the SUCCESS/FAILURE result line are handled by on_exit, trapped above)
+# (SUDO + WORK are set up earlier, before model detection; cleanup + the
+# SUCCESS/FAILURE result line are handled by on_exit, trapped above.)
 
 # ---- derive the kickstart FROM the source ISO -------------------------------
 alog extract "Extracting stock kickstart $KS_ISO_PATH from the ISO and inserting the unattended block"
@@ -252,10 +326,22 @@ xorriso -osirrox on -indev "$SRC_ISO" -extract "$KS_ISO_PATH" "$WORK/stock-ks.cf
 [ -s "$WORK/stock-ks.cfg" ] || die "extracted stock kickstart is empty: $KS_ISO_PATH"
 
 BLOCK_FILE="$BLOCK_FILE" STOCK="$WORK/stock-ks.cfg" DST="$WORK/derived-ks.cfg" \
-HOST_PREFIX="$HOST_PREFIX" CUSTOM_POST="$CUSTOM_POST" python3 - <<'PY'
+HOST_PREFIX="$HOST_PREFIX" CUSTOM_POST="$CUSTOM_POST" \
+APPLIANCE_ROLE="$APPLIANCE_ROLE" APPLIANCE_ISCSI="$APPLIANCE_ISCSI" python3 - <<'PY'
 import os, re
 stock = open(os.environ['STOCK']).read()
 block = open(os.environ['BLOCK_FILE']).read()
+# Consolidated (13.1+) VIA: the role is chosen at first boot, so add the two
+# applianceRole.* keys into the vbr_init.cfg heredoc (just before its terminator).
+arole = os.environ.get('APPLIANCE_ROLE', '').strip()
+if arole:
+    aiscsi = os.environ.get('APPLIANCE_ISCSI', 'false').strip() or 'false'
+    add = ("# VIA host role (13.1+): applied at first boot by veeamhostmanager.\n"
+           "applianceRole.role=%s\napplianceRole.iSCSI=%s\n" % (arole, aiscsi))
+    block, n = re.subn(r'(?m)^VEEAM_INIT_CFG_EOF$', add + "VEEAM_INIT_CFG_EOF", block, count=1)
+    if n != 1:
+        raise SystemExit("ERROR: could not find the vbr_init.cfg heredoc terminator "
+                         "(VEEAM_INIT_CFG_EOF) to inject applianceRole.* — block template changed.")
 # Our unattended block, optionally followed by the customer's --custom-post snippet
 # (inserted verbatim, wrapped in markers — additive, at the customer's own risk).
 insert = block.rstrip('\n')
@@ -293,20 +379,26 @@ fi
 alog grub "Deriving grub.cfg from the ISO and patching for role '$ROLE'"
 xorriso -osirrox on -indev "$SRC_ISO" -extract /EFI/BOOT/grub.cfg "$WORK/grub-stock.cfg" >/dev/null 2>&1
 
-GRUB_DEFAULT="$GRUB_DEFAULT" KS_ISO_PATH="$KS_ISO_PATH" \
+GRUB_DEFAULT="$GRUB_DEFAULT" KS_ISO_PATH="$KS_ISO_PATH" GRUB_EXTRA="$GRUB_EXTRA" \
 SRC="$WORK/grub-stock.cfg" DST="$WORK/grub.cfg" python3 - <<'PY'
 import os, re
 src, dst = os.environ['SRC'], os.environ['DST']
 default, ks = os.environ['GRUB_DEFAULT'], os.environ['KS_ISO_PATH']
+extra = os.environ.get('GRUB_EXTRA', '')   # e.g. ' inst.vsingledisk' (consolidated single-disk); '' otherwise
 t = open(src).read()
 t, n = re.subn(r'^set default=.*$', 'set default="%s"' % default, t, count=1, flags=re.M)
 assert n == 1, "could not set grub default"
 t, n = re.subn(r'^set timeout=.*$', 'set timeout=10', t, count=1, flags=re.M)
 assert n == 1, "could not set grub timeout"
-# Append inst.assumeyes to the fresh-Install line for this role only.
-marker = ":%s quiet" % ks            # e.g. ':/proxy-ks.cfg quiet' — unique to the fresh Install entry
-t, n = re.subn(re.escape(marker), ":%s inst.assumeyes quiet" % ks, t)
-assert n == 1, "expected exactly 1 fresh-Install line for %s, found %d" % (ks, n)
+# Append inst.assumeyes to the TARGET fresh-Install line only. The marker is the ks
+# path plus any layout token (GRUB_EXTRA) that uniquely identifies that entry —
+# e.g. ':/proxy-ks.cfg quiet' (standard) or ':/proxy-ks.cfg inst.vsingledisk quiet'
+# (single). Reinstall/upgrade entries carry inst.vreinst/inst.vlhr-upgrade, so they
+# don't collide.
+marker = ":%s%s quiet" % (ks, extra)
+repl   = ":%s%s inst.assumeyes quiet" % (ks, extra)
+t, n = re.subn(re.escape(marker), repl, t)
+assert n == 1, "expected exactly 1 fresh-Install line matching '%s', found %d" % (marker, n)
 open(dst, 'w').write(t)
 PY
 GRUB_CFG="$WORK/grub.cfg"

@@ -42,8 +42,9 @@ param(
     [string]$IsoPath,
     [string]$IdentityFile,
     [string]$OutputDir = ".",
-    [ValidateSet('proxy', 'vmware-proxy', 'hardened-repo', 'vsa', 'vbem')][string]$Role,
+    [ValidateSet('proxy', 'storage-proxy', 'vmware-proxy', 'hardened-repo', 'vsa', 'vbem')][string]$Role,   # vmware-proxy = deprecated alias for storage-proxy
     [string]$HostnamePrefix,
+    [ValidateSet('standard', 'single')][string]$DiskLayout,   # VIA 13.1+ only: required there, rejected otherwise
     [string]$Ntp,
     [switch]$SkipNtpSync,
     [switch]$VeeamAdminMfa,
@@ -82,6 +83,7 @@ $TransportScript = {
         [string]$OutputDir = ".",
         [string]$Role,
         [string]$HostnamePrefix,
+        [string]$DiskLayout,
         [string]$Ntp,
         [switch]$SkipNtpSync,
         [switch]$VeeamAdminMfa,
@@ -180,8 +182,29 @@ $TransportScript = {
     # Transport log (Veeam job-style, FILE-ONLY). NEVER receives a secret.
     function Write-TLog {
         param([string]$Level = 'Info', [Parameter(Mandatory)][string]$Msg)
+        if (-not $script:TLog) { return }
         $line = "[{0}]    <{1}>    {2,-7}    {3}" -f (Get-Date -Format "dd.MM.yyyy HH:mm:ss.fff"), $PID, $Level, $Msg
-        try { Add-Content -LiteralPath $script:TLog -Value $line } catch { }
+        # Logging must NEVER interfere with the build, and must never spam the operator.
+        # Two hazards this guards against, both seen for real on 2026-07-30:
+        #  1. Add-Content raises a NON-TERMINATING error, which try/catch does NOT catch -
+        #     it lands on the Error stream instead, and the GUI drains that stream into the
+        #     log pane. One missing directory therefore printed 7 scary "ERROR:" lines on a
+        #     build that actually SUCCEEDED. -ErrorAction Stop makes it catchable.
+        #  2. The log directory can go missing mid-run (observed; cause not yet established).
+        #     So re-create it on demand rather than trusting the one New-Item at startup.
+        try {
+            $d = Split-Path -Parent $script:TLog
+            if ($d -and -not (Test-Path -LiteralPath $d)) {
+                New-Item -ItemType Directory -Force -Path $d -ErrorAction Stop | Out-Null
+            }
+            Add-Content -LiteralPath $script:TLog -Value $line -ErrorAction Stop
+        } catch {
+            # Last resort: note it ONCE on the console, never on the Error stream, then go quiet.
+            if (-not $script:TLogBroken) {
+                $script:TLogBroken = $true
+                Write-Host "NOTE: transport log unavailable ($($_.Exception.Message)) - the build continues; per-run build logs are unaffected."
+            }
+        }
     }
 
     # Retry wrapper for non-interactive ssh/scp steps (not the build itself).
@@ -286,6 +309,7 @@ $TransportScript = {
     # custom-post file name are all operator-supplied text.
     $mgFlags = "--non-interactive --role $(ConvertTo-ShSq $Role) --ntp $(ConvertTo-ShSq $Ntp)"
     if ($HostnamePrefix) { $mgFlags += " --hostname-prefix $(ConvertTo-ShSq $HostnamePrefix)" }
+    if ($DiskLayout)     { $mgFlags += " --disk-layout $(ConvertTo-ShSq $DiskLayout)" }
     if ($SkipNtpSync)    { $mgFlags += " --skip-ntp-sync" }
     if ($VeeamAdminMfa)  { $mgFlags += " --veeamadmin-mfa" }
     if ($NoVeeamso)      { $mgFlags += " --no-veeamso" }
@@ -304,10 +328,22 @@ $TransportScript = {
     #   future ISO carries Joliet/Rock Ridge to Windows) AND the ISO9660-mangled form,
     #   across every mounted volume. Best-effort: if mounting is blocked we warn and let
     #   build-appliance-iso.sh's own xorriso extract-or-die be the authoritative backstop.
-    $roleKs = @{ 'proxy' = 'proxy-ks.cfg'; 'vmware-proxy' = 'vmware-proxy-ks.cfg'; 'hardened-repo' = 'hardened-repo-ks.cfg'; 'vsa' = 'vbr-ks.cfg'; 'vbem' = 'vbem-ks.cfg' }[$Role]
-    if ($roleKs) {
+    # Acceptable root kickstart(s) for the role. VIA roles accept EITHER their legacy
+    # per-role ks (pre-13.1) OR proxy-ks.cfg (13.1+ consolidated: one JEOS install, role
+    # chosen at first boot) - so the pre-check passes on both models and only trips on a
+    # genuinely wrong ISO (e.g. a VSA ISO picked for a VIA role). build-appliance-iso.sh
+    # does the authoritative model detection + fail-loud.
+    $roleKsList = @{
+        'proxy'         = @('proxy-ks.cfg')
+        'storage-proxy' = @('vmware-proxy-ks.cfg', 'proxy-ks.cfg')
+        'vmware-proxy'  = @('vmware-proxy-ks.cfg', 'proxy-ks.cfg')
+        'hardened-repo' = @('hardened-repo-ks.cfg', 'proxy-ks.cfg')
+        'vsa'           = @('vbr-ks.cfg')
+        'vbem'          = @('vbem-ks.cfg')
+    }[$Role]
+    if ($roleKsList) {
         $isoHasKs = $null
-        $ksNames  = @($roleKs, ($roleKs.ToUpper() -replace '-', '_'))   # literal + ISO9660-mangled (PROXY_KS.CFG)
+        $ksNames  = foreach ($k in $roleKsList) { $k; ($k.ToUpper() -replace '-', '_') }   # literal + ISO9660-mangled (PROXY_KS.CFG)
         try {
             $di   = Mount-DiskImage -ImagePath $iso.FullName -PassThru -ErrorAction Stop
             $drvs = @($di | Get-Volume | Where-Object DriveLetter | ForEach-Object DriveLetter)
@@ -326,10 +362,11 @@ $TransportScript = {
             Dismount-DiskImage -ImagePath $iso.FullName -ErrorAction SilentlyContinue | Out-Null
         }
         if ($isoHasKs -eq $false) {
-            Write-TLog -Level Error -Msg "Pre-check FAILED: ISO has no /$roleKs for role $Role"
-            throw "The selected ISO has no '/$roleKs' at its root, so it can't build the '$Role' role. Wrong ISO? proxy/vmware-proxy/hardened-repo need the VeeamInfrastructureAppliance ISO; vsa/vbem need the VeeamSoftwareAppliance ISO."
+            $want = $roleKsList -join ' or /'
+            Write-TLog -Level Error -Msg "Pre-check FAILED: ISO has no /$want for role $Role"
+            throw "The selected ISO has no '/$want' at its root, so it can't build the '$Role' role. Wrong ISO? proxy/storage-proxy/hardened-repo need the Veeam Infrastructure Appliance / JEOS ISO; vsa/vbem need the VeeamSoftwareAppliance ISO."
         }
-        if ($isoHasKs) { Write-TLog -Msg "Pre-check OK: ISO contains /$roleKs (role $Role)" }
+        if ($isoHasKs) { Write-TLog -Msg "Pre-check OK: ISO contains a valid kickstart for role $Role" }
     }
 
     # =========================================================================
@@ -940,8 +977,15 @@ $script:wslReady = $false
 # Role
 Add-RowLabel "ISO type (role):" $y | Out-Null
 $cboRole = New-Object System.Windows.Forms.ComboBox; $cboRole.SetBounds($CX, $y, 260, 22); $cboRole.DropDownStyle = 'DropDownList'
-[void]$cboRole.Items.AddRange(@('proxy', 'vmware-proxy', 'hardened-repo', 'vsa', 'vbem')); $cboRole.SelectedIndex = 0
+[void]$cboRole.Items.AddRange(@('proxy', 'storage-proxy', 'hardened-repo', 'vsa', 'vbem')); $cboRole.SelectedIndex = 0
 $form.Controls.Add($cboRole); $y += 30
+
+# Disk layout (VIA 13.1+ only): REQUIRED there, no default. Disabled for VSA roles.
+# The '(not applicable...)' item keeps pre-13.1 (legacy) VIA ISOs buildable via the GUI.
+$lblDisk = Add-RowLabel "Disk layout (VIA 13.1+):" $y
+$cboDisk = New-Object System.Windows.Forms.ComboBox; $cboDisk.SetBounds($CX, $y, 320, 22); $cboDisk.DropDownStyle = 'DropDownList'
+[void]$cboDisk.Items.AddRange(@('standard (multi-disk)', 'single (single-disk)', 'not applicable (pre-13.1 ISO)')); $cboDisk.SelectedIndex = -1
+$form.Controls.Add($cboDisk); $y += 30
 
 # Source ISO
 Add-RowLabel "Source ISO:" $y | Out-Null
@@ -1034,24 +1078,38 @@ Set-FormFit
 
 # ---- field-rule helpers -----------------------------------------------------
 function Update-FormRules {
-    $isHR = ($cboRole.SelectedItem -eq 'hardened-repo')
-    # HR forces MFA on BOTH accounts and requires the SO account - lock those controls on.
-    if ($isHR) {
-        $chkVeeamso.Checked = $true; $chkVeeamso.Enabled = $false
-        $chkAdminMfa.Checked = $true; $chkAdminMfa.Enabled = $false
-    } else {
-        $chkVeeamso.Enabled = $true
+    # MFA invariant - HARDENED REPOSITORY ONLY. The platform's actual rule (verified in
+    # the 13.1 hostmanager binary, confirmed by Veeam PM): a Hardened Repository requires
+    # either a configured Security Officer OR veeamadmin with MFA enabled. An enabled
+    # veeamso always carries enforced MFA, so for hardened-repo: veeamso OFF => veeamadmin
+    # MFA is FORCED ON + locked. Every OTHER role has NO platform MFA requirement (13.1's
+    # own setup wizard allows veeamso off AND veeamadmin MFA off), so we leave the choice
+    # free there rather than being stricter than the appliance.
+    # Re-evaluated on the veeamso toggle AND the role dropdown, so both "uncheck admin MFA
+    # then disable veeamso" and "disable veeamso then switch role to hardened-repo"
+    # re-lock admin MFA on.
+    $soOn    = $chkVeeamso.Checked
+    $isHr    = ([string]$cboRole.SelectedItem -eq 'hardened-repo')
+    if ($soOn -or -not $isHr) {
         $chkAdminMfa.Enabled = $true
+    } else {
+        $chkAdminMfa.Checked = $true; $chkAdminMfa.Enabled = $false
     }
     # veeamso fields follow the enable checkbox. veeamso MFA is ALWAYS enforced when the
     # account is enabled (the kit has no SO-MFA-off path) - so it's shown checked+locked.
-    $soOn = $chkVeeamso.Checked
     $txtSoPw.Enabled = $soOn
     $txtSoPw2.Enabled = $soOn
     $chkSoMfa.Checked = $soOn
     $lblSoMsg.Visible = $soOn
     $txtSoKey.Enabled = ($soOn -and $chkByo.Checked)
     $txtSoTok.Enabled = ($soOn -and $chkByo.Checked)
+
+    # Disk layout applies only to the VIA family; a pick is REQUIRED there (gated in
+    # Update-Validation). Disable + clear it for VSA roles (vsa/vbem).
+    $isVia = @('proxy', 'storage-proxy', 'vmware-proxy', 'hardened-repo') -contains [string]$cboRole.SelectedItem
+    $cboDisk.Enabled = $isVia
+    $lblDisk.Enabled = $isVia
+    if (-not $isVia) { $cboDisk.SelectedIndex = -1 }
 }
 function Update-Validation {
     $adminErrs = Test-VeeamPasswordPolicy $txtAdminPw.Text
@@ -1069,8 +1127,12 @@ function Update-Validation {
         elseif ($txtSoPw2.Text -cne $txtSoPw.Text) { $lblSoMsg.Text = "passwords do not match"; $lblSoMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okSo = $false }
         else { $lblSoMsg.Text = "OK"; $lblSoMsg.ForeColor = [System.Drawing.Color]::ForestGreen; $okSo = $true }
     }
+    # Disk layout is REQUIRED for VIA roles (an explicit pick, incl. the pre-13.1 N/A item).
+    $isVia = @('proxy', 'storage-proxy', 'vmware-proxy', 'hardened-repo') -contains [string]$cboRole.SelectedItem
+    $okDisk = (-not $isVia) -or ($cboDisk.SelectedIndex -ge 0)
+    if ($isVia -and -not $okDisk) { $lblDisk.ForeColor = [System.Drawing.Color]::Firebrick } else { $lblDisk.ForeColor = [System.Drawing.SystemColors]::ControlText }
     $backendOK = if ($script:Backend -eq 'WSL') { [bool]$script:wslReady } else { $true }
-    $btnBuild.Enabled = ($okAdmin -and $okSo -and $backendOK -and -not $script:Building)
+    $btnBuild.Enabled = ($okAdmin -and $okSo -and $okDisk -and $backendOK -and -not $script:Building)
 }
 
 # Show only the connection controls for the chosen backend (Local WSL2 vs Remote SSH).
@@ -1129,6 +1191,7 @@ $chkByo.Add_CheckedChanged({
     Update-FormRules
 })
 $cboRole.Add_SelectedIndexChanged({ Update-FormRules; Update-Validation })
+$cboDisk.Add_SelectedIndexChanged({ Update-Validation })
 $chkVeeamso.Add_CheckedChanged({ Update-FormRules; Update-Validation })
 $txtAdminPw.Add_TextChanged({ Update-Validation })
 $txtAdminPw2.Add_TextChanged({ Update-Validation })
@@ -1273,6 +1336,12 @@ $btnBuild.Add_Click({
         $p.WslDistro    = $distro
     }
     if ($txtPrefix.Text.Trim()) { $p.HostnamePrefix = $txtPrefix.Text.Trim() }
+    # Disk layout: pass standard|single only. '(not applicable)' or a VSA role => omit
+    # (the engine requires it for a consolidated 13.1+ VIA ISO and rejects it otherwise).
+    switch -Wildcard ([string]$cboDisk.SelectedItem) {
+        'standard*' { $p.DiskLayout = 'standard' }
+        'single*'   { $p.DiskLayout = 'single' }
+    }
     if ($chkAdminMfa.Checked)   { $p.VeeamAdminMfa  = $true }
     if (-not $chkVeeamso.Checked) {
         $p.NoVeeamso = $true
