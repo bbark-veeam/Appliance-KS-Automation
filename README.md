@@ -189,13 +189,15 @@ host's login user must be **root or able to `sudo`** (the build loop-mounts the 
   > passwords if a baked appliance is ever exposed.
 - **Passwords:** you supply the two account passwords (must differ; STIG-compliant).
 - **Scope:** one golden ISO, shared credentials across all appliances in a deployment.
-- **MFA (at least one account must carry it):**
-  - `veeamso` — enforced when the account is enabled (Veeam default).
-  - `veeamadmin` — a Y/N choice **when `veeamso` is enabled** (default off, since the
-    enabled `veeamso` already satisfies the "MFA somewhere" rule); **forced ON when
-    `veeamso` is disabled** (otherwise MFA would be nowhere). This applies to every role —
-    it replaces the older "force MFA on both for hardened-repo" simplification. The
-    veeamadmin key is generated either way, so MFA can be turned on later if left off.
+- **MFA:**
+  - `veeamso` — enforced whenever the account is enabled (appliance default; not optional).
+  - `veeamadmin` — your Y/N choice (default off). The key is generated either way, so MFA
+    can be enabled later even if you leave it off at build time.
+  - **One exception, for the `hardened-repo` role only:** a Veeam Hardened Repository
+    requires MFA on either a configured Security Officer **or** `veeamadmin`. So for
+    `hardened-repo`, disabling `veeamso` **forces `veeamadmin` MFA on** (the GUI locks the
+    checkbox). Other roles have no such requirement — you may disable `veeamso` and leave
+    `veeamadmin` MFA off, exactly as the appliance's own setup wizard allows.
 - **veeamso account:** enabled by default; `make-golden-iso.sh` can **disable** it
   (`veeamso.isEnabled=false`) — mirrors the GUI's "enable Security Officer" choice.
 - **Hostname:** you choose a prefix; each appliance gets `<prefix>-<unique-hash>`
