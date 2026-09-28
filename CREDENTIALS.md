@@ -38,8 +38,9 @@ Record what it prints:
 > produce. Configuring MFA on the appliance issues a **freshly generated secret key per
 > account** and shows it as a QR code to enroll — there is no field for choosing the
 > key — so two accounts cannot end up sharing a seed that way. An answer file is the
-> only thing that can express a shared key, which is why nothing rejects it there. The
-> rule closes that gap rather than adding a restriction.
+> only surface that can express a shared key at all, so rejecting it at build time means
+> it never reaches an appliance. The rule closes that gap rather than adding a
+> restriction.
 >
 > A deliberately **fleet-wide shared key** — the same `veeamadmin` key on every
 > appliance you build — is still fully supported and unaffected; what is blocked is
