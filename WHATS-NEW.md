@@ -3,6 +3,12 @@
 Current version: see `VERSION`. Newest changes first. Each release is packaged as a
 versioned, retained build (see `builds/`).
 
+## New changes — 2026-09-28 (v2.2.1)
+- **The graphical builder now confirms your bring-your-own MFA keys and recovery token, and checks them as you type.** Under **Advanced -> "Bring your own MFA keys / recovery token"**, each of the three values (veeamadmin MFA key, veeamso MFA key, veeamso recovery token) now has a **confirm box**, and a status note beside it reports **as you type** whether the value is the right format and whether the two entries match. **Build** stays disabled until they do.
+  - **Why it matters:** these fields are masked (v2.1.1), so you cannot check a typo on screen — and a format check alone cannot catch a value that is *well-formed but wrong*. Mistype one character of a 16-character Base32 MFA key and it is still valid Base32, so the old check passed it. Because one golden ISO deploys to many appliances, a wrong MFA seed means **every appliance built from that ISO fails MFA at first login**, and you only find out at that point. Re-entering the value catches it before the build starts.
+  - **Nothing changes if you don't use BYO keys.** Leaving the fields blank still means "generate fresh keys for this build", and that remains the recommended default. The existing format rules are unchanged (16-character Base32 for MFA keys, a GUID for the recovery token), as is the clearing of all secret fields after a successful build.
+- No changes to the build engine, the command-line paths (`make-golden-iso.sh`, `make-golden-remote.ps1`), the answer file, or anything on the built ISO. This release only affects data entry in the Windows graphical builder.
+
 ## New changes — 2026-07-30 (v2.2.0)
 - **Support for the Veeam 13.1+ appliance kickstart change — while keeping full 13.0 support.** From 13.1 onward the Infrastructure Appliance / JEOS ISO **consolidates all VIA roles into one install**: there is a single `proxy-ks.cfg`, and the host role is chosen at **first boot** via new `vbr_init.cfg` keys (`applianceRole.role` + `applianceRole.iSCSI`) instead of per-role kickstarts + role-named boot menus. The kit now:
   - **Auto-detects the build model from the ISO's structure** (not a version number, so a relabeled/dev build can't fool it) and picks the right path automatically. **13.0 ISOs keep working exactly as before** (per-role kickstart + role submenu); nothing changes for them, and the 13.0 path stays supported until Veeam ends support for 13.0.

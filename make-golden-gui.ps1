@@ -1029,7 +1029,7 @@ $chkAdvanced = New-Object System.Windows.Forms.CheckBox; $chkAdvanced.SetBounds(
 
 # Advanced group (collapsed by default; toggling shifts everything below it)
 $grpAdv = New-Object System.Windows.Forms.GroupBox
-$grpAdv.SetBounds($LX, $y, 668, 230); $grpAdv.Text = "Advanced"; $grpAdv.Visible = $false   # tall enough for all rows incl. the recovery-token field (was 196 -> clipped + overlapped Build)
+$grpAdv.SetBounds($LX, $y, 668, 308); $grpAdv.Text = "Advanced"; $grpAdv.Visible = $false   # tall enough for all rows incl. the BYO confirm rows (196 -> clipped + overlapped Build; 230 -> pre-confirm)
 $form.Controls.Add($grpAdv)
 $ay = 22
 $chkSkipNtp = New-Object System.Windows.Forms.CheckBox; $chkSkipNtp.SetBounds(12, $ay, 620, 22); $chkSkipNtp.Text = "Skip NTP time-sync at first boot (--skip-ntp-sync)"; $grpAdv.Controls.Add($chkSkipNtp); $ay += 26
@@ -1038,12 +1038,23 @@ $lblPost = New-Object System.Windows.Forms.Label; $lblPost.SetBounds(12, ($ay + 
 $txtPost = New-Object System.Windows.Forms.TextBox; $txtPost.SetBounds(196, $ay, 380, 22); $grpAdv.Controls.Add($txtPost)
 $btnPost = New-Object System.Windows.Forms.Button; $btnPost.SetBounds(582, ($ay - 1), 74, 24); $btnPost.Text = "Browse..."; $grpAdv.Controls.Add($btnPost); $ay += 30
 $chkByo = New-Object System.Windows.Forms.CheckBox; $chkByo.SetBounds(12, $ay, 620, 22); $chkByo.Text = "Bring your own MFA keys / recovery token (blank = auto-generate)"; $grpAdv.Controls.Add($chkByo); $ay += 26
+# BYO secrets are masked, so a mistyped value cannot be spotted on screen: each takes a
+# confirm box, and the status label to the right reports format + match live.
 $lblAdminKey = New-Object System.Windows.Forms.Label; $lblAdminKey.SetBounds(12, ($ay + 3), 200, 18); $lblAdminKey.Text = "veeamadmin MFA key (16 Base32):"; $grpAdv.Controls.Add($lblAdminKey)
-$txtAdminKey = New-Object System.Windows.Forms.TextBox; $txtAdminKey.SetBounds(216, $ay, 200, 22); $txtAdminKey.UseSystemPasswordChar = $true; $txtAdminKey.Enabled = $false; $grpAdv.Controls.Add($txtAdminKey); $ay += 26
+$txtAdminKey = New-Object System.Windows.Forms.TextBox; $txtAdminKey.SetBounds(216, $ay, 200, 22); $txtAdminKey.UseSystemPasswordChar = $true; $txtAdminKey.Enabled = $false; $grpAdv.Controls.Add($txtAdminKey)
+$lblAdminKeyMsg = New-Object System.Windows.Forms.Label; $lblAdminKeyMsg.SetBounds(524, ($ay + 3), 132, 18); $grpAdv.Controls.Add($lblAdminKeyMsg); $ay += 26
+$lblAdminKey2 = New-Object System.Windows.Forms.Label; $lblAdminKey2.SetBounds(28, ($ay + 3), 184, 18); $lblAdminKey2.Text = "confirm:"; $grpAdv.Controls.Add($lblAdminKey2)
+$txtAdminKey2 = New-Object System.Windows.Forms.TextBox; $txtAdminKey2.SetBounds(216, $ay, 200, 22); $txtAdminKey2.UseSystemPasswordChar = $true; $txtAdminKey2.Enabled = $false; $grpAdv.Controls.Add($txtAdminKey2); $ay += 26
 $lblSoKey = New-Object System.Windows.Forms.Label; $lblSoKey.SetBounds(12, ($ay + 3), 200, 18); $lblSoKey.Text = "veeamso MFA key (16 Base32):"; $grpAdv.Controls.Add($lblSoKey)
-$txtSoKey = New-Object System.Windows.Forms.TextBox; $txtSoKey.SetBounds(216, $ay, 200, 22); $txtSoKey.UseSystemPasswordChar = $true; $txtSoKey.Enabled = $false; $grpAdv.Controls.Add($txtSoKey); $ay += 26
+$txtSoKey = New-Object System.Windows.Forms.TextBox; $txtSoKey.SetBounds(216, $ay, 200, 22); $txtSoKey.UseSystemPasswordChar = $true; $txtSoKey.Enabled = $false; $grpAdv.Controls.Add($txtSoKey)
+$lblSoKeyMsg = New-Object System.Windows.Forms.Label; $lblSoKeyMsg.SetBounds(524, ($ay + 3), 132, 18); $grpAdv.Controls.Add($lblSoKeyMsg); $ay += 26
+$lblSoKey2 = New-Object System.Windows.Forms.Label; $lblSoKey2.SetBounds(28, ($ay + 3), 184, 18); $lblSoKey2.Text = "confirm:"; $grpAdv.Controls.Add($lblSoKey2)
+$txtSoKey2 = New-Object System.Windows.Forms.TextBox; $txtSoKey2.SetBounds(216, $ay, 200, 22); $txtSoKey2.UseSystemPasswordChar = $true; $txtSoKey2.Enabled = $false; $grpAdv.Controls.Add($txtSoKey2); $ay += 26
 $lblSoTok = New-Object System.Windows.Forms.Label; $lblSoTok.SetBounds(12, ($ay + 3), 200, 18); $lblSoTok.Text = "veeamso recovery token (GUID):"; $grpAdv.Controls.Add($lblSoTok)
 $txtSoTok = New-Object System.Windows.Forms.TextBox; $txtSoTok.SetBounds(216, $ay, 300, 22); $txtSoTok.UseSystemPasswordChar = $true; $txtSoTok.Enabled = $false; $grpAdv.Controls.Add($txtSoTok)
+$lblSoTokMsg = New-Object System.Windows.Forms.Label; $lblSoTokMsg.SetBounds(524, ($ay + 3), 132, 18); $grpAdv.Controls.Add($lblSoTokMsg); $ay += 26
+$lblSoTok2 = New-Object System.Windows.Forms.Label; $lblSoTok2.SetBounds(28, ($ay + 3), 184, 18); $lblSoTok2.Text = "confirm:"; $grpAdv.Controls.Add($lblSoTok2)
+$txtSoTok2 = New-Object System.Windows.Forms.TextBox; $txtSoTok2.SetBounds(216, $ay, 300, 22); $txtSoTok2.UseSystemPasswordChar = $true; $txtSoTok2.Enabled = $false; $grpAdv.Controls.Add($txtSoTok2)
 
 # Bottom panel (Build + status + log) - repositioned when Advanced toggles.
 $pnlBottom = New-Object System.Windows.Forms.Panel
@@ -1102,7 +1113,9 @@ function Update-FormRules {
     $chkSoMfa.Checked = $soOn
     $lblSoMsg.Visible = $soOn
     $txtSoKey.Enabled = ($soOn -and $chkByo.Checked)
+    $txtSoKey2.Enabled = ($soOn -and $chkByo.Checked)
     $txtSoTok.Enabled = ($soOn -and $chkByo.Checked)
+    $txtSoTok2.Enabled = ($soOn -and $chkByo.Checked)
 
     # Disk layout applies only to the VIA family; a pick is REQUIRED there (gated in
     # Update-Validation). Disable + clear it for VSA roles (vsa/vbem).
@@ -1111,6 +1124,30 @@ function Update-FormRules {
     $lblDisk.Enabled = $isVia
     if (-not $isVia) { $cboDisk.SelectedIndex = -1 }
 }
+# Live red/green for one BYO secret + its confirm box. Blank in BOTH is neutral (it means
+# auto-generate), so it must not read as an error. Test-B32 is case-SENSITIVE upper-case and
+# the value is upper-cased before use, so validate and compare on the upper-cased form.
+# Returns $true when the pair is acceptable.
+function Update-ByoPair {
+    param($Box, $Confirm, $Label, [string]$Kind, [bool]$Active)
+    if (-not $Active) { $Label.Text = ''; return $true }
+    $v = $Box.Text.Trim()
+    $c = $Confirm.Text.Trim()
+    if (-not $v -and -not $c) { $Label.Text = ''; return $true }
+    $wellFormed = if ($Kind -eq 'guid') { Test-Guid $v } else { Test-B32 ($v.ToUpper()) }
+    if (-not $wellFormed) {
+        $Label.Text = if ($Kind -eq 'guid') { 'need GUID' } else { 'need 16 Base32' }
+        $Label.ForeColor = [System.Drawing.Color]::Firebrick
+        return $false
+    }
+    if ($c -ne $v) {
+        $Label.Text = 'no match'; $Label.ForeColor = [System.Drawing.Color]::Firebrick
+        return $false
+    }
+    $Label.Text = 'OK'; $Label.ForeColor = [System.Drawing.Color]::ForestGreen
+    return $true
+}
+
 function Update-Validation {
     $adminErrs = Test-VeeamPasswordPolicy $txtAdminPw.Text
     if ($txtAdminPw.Text.Length -eq 0) { $lblAdminMsg.Text = ''; $okAdmin = $false }
@@ -1127,12 +1164,24 @@ function Update-Validation {
         elseif ($txtSoPw2.Text -cne $txtSoPw.Text) { $lblSoMsg.Text = "passwords do not match"; $lblSoMsg.ForeColor = [System.Drawing.Color]::Firebrick; $okSo = $false }
         else { $lblSoMsg.Text = "OK"; $lblSoMsg.ForeColor = [System.Drawing.Color]::ForestGreen; $okSo = $true }
     }
+    # BYO keys: evaluate every pair before combining - '-and' short-circuits, which would
+    # leave a later field's label stale once an earlier one failed.
+    $okByo = $true
+    if ($chkByo.Checked) {
+        $okAdminKey = Update-ByoPair $txtAdminKey $txtAdminKey2 $lblAdminKeyMsg 'b32'  $true
+        $okSoKey    = Update-ByoPair $txtSoKey    $txtSoKey2    $lblSoKeyMsg    'b32'  $chkVeeamso.Checked
+        $okSoTok    = Update-ByoPair $txtSoTok    $txtSoTok2    $lblSoTokMsg    'guid' $chkVeeamso.Checked
+        $okByo = $okAdminKey -and $okSoKey -and $okSoTok
+    } else {
+        $lblAdminKeyMsg.Text = ''; $lblSoKeyMsg.Text = ''; $lblSoTokMsg.Text = ''
+    }
+
     # Disk layout is REQUIRED for VIA roles (an explicit pick, incl. the pre-13.1 N/A item).
     $isVia = @('proxy', 'storage-proxy', 'vmware-proxy', 'hardened-repo') -contains [string]$cboRole.SelectedItem
     $okDisk = (-not $isVia) -or ($cboDisk.SelectedIndex -ge 0)
     if ($isVia -and -not $okDisk) { $lblDisk.ForeColor = [System.Drawing.Color]::Firebrick } else { $lblDisk.ForeColor = [System.Drawing.SystemColors]::ControlText }
     $backendOK = if ($script:Backend -eq 'WSL') { [bool]$script:wslReady } else { $true }
-    $btnBuild.Enabled = ($okAdmin -and $okSo -and $okDisk -and $backendOK -and -not $script:Building)
+    $btnBuild.Enabled = ($okAdmin -and $okSo -and $okDisk -and $okByo -and $backendOK -and -not $script:Building)
 }
 
 # Show only the connection controls for the chosen backend (Local WSL2 vs Remote SSH).
@@ -1188,7 +1237,9 @@ $chkAdvanced.Add_CheckedChanged({
 })
 $chkByo.Add_CheckedChanged({
     $txtAdminKey.Enabled = $chkByo.Checked
+    $txtAdminKey2.Enabled = $chkByo.Checked
     Update-FormRules
+    Update-Validation
 })
 $cboRole.Add_SelectedIndexChanged({ Update-FormRules; Update-Validation })
 $cboDisk.Add_SelectedIndexChanged({ Update-Validation })
@@ -1197,6 +1248,12 @@ $txtAdminPw.Add_TextChanged({ Update-Validation })
 $txtAdminPw2.Add_TextChanged({ Update-Validation })
 $txtSoPw.Add_TextChanged({ Update-Validation })
 $txtSoPw2.Add_TextChanged({ Update-Validation })
+$txtAdminKey.Add_TextChanged({ Update-Validation })
+$txtAdminKey2.Add_TextChanged({ Update-Validation })
+$txtSoKey.Add_TextChanged({ Update-Validation })
+$txtSoKey2.Add_TextChanged({ Update-Validation })
+$txtSoTok.Add_TextChanged({ Update-Validation })
+$txtSoTok2.Add_TextChanged({ Update-Validation })
 $cboWslDistro.Add_SelectedIndexChanged({ Update-WslStatus; Update-Validation })
 $btnWslRefresh.Add_Click({
     $script:WslInfo = Get-WslInfo
@@ -1223,7 +1280,7 @@ function Add-LogLine { param([string]$Text) $txtLog.AppendText($Text + "`r`n") }
 # not a guaranteed secure erase. The SecureString handed to the build is the protected path;
 # the text box is the unavoidable plaintext entry point.
 function Clear-SensitiveFields {
-    foreach ($tb in @($txtAdminPw, $txtAdminPw2, $txtSoPw, $txtSoPw2, $txtAdminKey, $txtSoKey, $txtSoTok)) { if ($tb) { $tb.Clear() } }
+    foreach ($tb in @($txtAdminPw, $txtAdminPw2, $txtSoPw, $txtSoPw2, $txtAdminKey, $txtAdminKey2, $txtSoKey, $txtSoKey2, $txtSoTok, $txtSoTok2)) { if ($tb) { $tb.Clear() } }
     [System.GC]::Collect()
 }
 
@@ -1307,6 +1364,13 @@ $btnBuild.Add_Click({
         if ($txtAdminKey.Text.Trim() -and -not (Test-B32 ($txtAdminKey.Text.Trim().ToUpper()))) { [System.Windows.Forms.MessageBox]::Show("veeamadmin MFA key must be 16-char Base32 (A-Z, 2-7).", "Bad MFA key", 'OK', 'Warning') | Out-Null; return }
         if ($chkVeeamso.Checked -and $txtSoKey.Text.Trim() -and -not (Test-B32 ($txtSoKey.Text.Trim().ToUpper()))) { [System.Windows.Forms.MessageBox]::Show("veeamso MFA key must be 16-char Base32 (A-Z, 2-7).", "Bad MFA key", 'OK', 'Warning') | Out-Null; return }
         if ($chkVeeamso.Checked -and $txtSoTok.Text.Trim() -and -not (Test-Guid ($txtSoTok.Text.Trim()))) { [System.Windows.Forms.MessageBox]::Show("veeamso recovery token must be a GUID (XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX).", "Bad token", 'OK', 'Warning') | Out-Null; return }
+        # Confirm-box match. A format check cannot catch a valid-but-WRONG key (one mistyped
+        # Base32 character is still valid Base32), and a wrong baked MFA seed fails on every
+        # appliance from this ISO, at first login. Build is already gated on this; kept as a
+        # backstop so the check holds even if the gate is ever bypassed.
+        if ($txtAdminKey2.Text.Trim() -ne $txtAdminKey.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show("The veeamadmin MFA key and its confirmation do not match.", "Keys do not match", 'OK', 'Warning') | Out-Null; return }
+        if ($chkVeeamso.Checked -and $txtSoKey2.Text.Trim() -ne $txtSoKey.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show("The veeamso MFA key and its confirmation do not match.", "Keys do not match", 'OK', 'Warning') | Out-Null; return }
+        if ($chkVeeamso.Checked -and $txtSoTok2.Text.Trim() -ne $txtSoTok.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show("The veeamso recovery token and its confirmation do not match.", "Tokens do not match", 'OK', 'Warning') | Out-Null; return }
     }
 
     # ---- host-key type-to-confirm (DECISION 4) - BEFORE any credential leaves (SSH only) ----
