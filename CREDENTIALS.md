@@ -24,8 +24,27 @@ Record what it prints:
 | Field | Format | Notes |
 |-------|--------|-------|
 | `veeamadmin.mfaSecretKey` | 16-char Base32 | Enforced at first boot **if veeamadmin MFA is enabled** (always for hardened-repo; optional for proxy). Enroll it then. |
-| `veeamso.mfaSecretKey` | 16-char Base32 | MFA **always enforced** at first boot — the SO must enroll this on first login. |
+| `veeamso.mfaSecretKey` | 16-char Base32 | MFA **always enforced** at first boot — the SO must enroll this on first login. **Must differ from `veeamadmin.mfaSecretKey`** (see below). |
 | `veeamso.recoveryToken` | GUID (hex) | SO account recovery. **Store securely — it cannot be recovered later.** |
+
+> **The two MFA keys must differ.** A shared secret key means the *same* 6-digit
+> code satisfies MFA for both `veeamadmin` and the Security Officer, so one
+> authenticator entry covers both accounts and the separation the SO role exists to
+> provide is lost. `generate-secrets.sh` always produces two different keys; the rule
+> only matters if you supply your own. It is enforced by the builder, by
+> `build-appliance-iso.sh`, and by `check-credentials.sh`.
+>
+> This keeps an unattended build consistent with what the appliance's own setup can
+> produce. Configuring MFA on the appliance issues a **freshly generated secret key per
+> account** and shows it as a QR code to enroll — there is no field for choosing the
+> key — so two accounts cannot end up sharing a seed that way. An answer file is the
+> only surface that can express a shared key at all, so rejecting it at build time means
+> it never reaches an appliance. The rule closes that gap rather than adding a
+> restriction.
+>
+> A deliberately **fleet-wide shared key** — the same `veeamadmin` key on every
+> appliance you build — is still fully supported and unaffected; what is blocked is
+> sharing one key *between the two accounts*.
 
 ### B. Passwords + NTP + hostname — you set these (`<<SET_...>>` tokens)
 

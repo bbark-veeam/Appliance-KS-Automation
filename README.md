@@ -114,7 +114,10 @@ launch it asks **where you want to build**:
 
 Either way you fill the **same form** — role, source ISO, hostname prefix, NTP, output
 folder (defaults to `C:\temp`), and the veeamadmin / veeamso passwords — then click
-**Build ISO**. Passwords are held as a SecureString and handed to the build **via stdin
+**Build ISO**. Passwords and any bring-your-own MFA keys / recovery token each have a
+**confirm box** and are checked as you type (format, and that both entries match), with
+**Build** disabled until they pass — these fields are masked, so a typo cannot be spotted
+on screen. Passwords are held as a SecureString and handed to the build **via stdin
 only** (never a command line or environment variable); the built ISO + secrets sheet are
 permission-locked to you, and the build files are cleaned up when the run finishes. The
 **same `xorriso` engine** runs in both modes — only the *location* of the build differs.
