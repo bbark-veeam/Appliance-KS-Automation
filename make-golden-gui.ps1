@@ -1238,6 +1238,12 @@ $chkAdvanced.Add_CheckedChanged({
 $chkByo.Add_CheckedChanged({
     $txtAdminKey.Enabled = $chkByo.Checked
     $txtAdminKey2.Enabled = $chkByo.Checked
+    # Opting out discards what was typed. These are secrets (TOTP seeds and the MFA-bypass
+    # token), and leaving them in a greyed box implies they are still in play - they are not,
+    # the build reads them only while this box is checked.
+    if (-not $chkByo.Checked) {
+        foreach ($tb in @($txtAdminKey, $txtAdminKey2, $txtSoKey, $txtSoKey2, $txtSoTok, $txtSoTok2)) { if ($tb) { $tb.Clear() } }
+    }
     Update-FormRules
     Update-Validation
 })
