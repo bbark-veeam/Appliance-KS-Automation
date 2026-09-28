@@ -283,6 +283,11 @@ if get("veeamso.isEnabled") == "true":
     problems += check(so, "veeamso")
     if admin is not None and so == admin:
         problems.append("veeamadmin and veeamso passwords must differ")
+    # Same reasoning for the MFA seeds: a shared TOTP seed means one authenticator entry
+    # satisfies MFA for both accounts, defeating the separate Security Officer.
+    ak = get("veeamadmin.mfaSecretKey"); sk = get("veeamso.mfaSecretKey")
+    if ak and sk and ak.upper() == sk.upper():
+        problems.append("veeamadmin and veeamso MFA secret keys must differ")
 # MFA invariant — HARDENED REPOSITORY ONLY. The appliance's actual rule, verified in
 # the 13.1 hostmanager binary and confirmed by Veeam PM:
 #   "A Veeam Hardened Repository requires either a configured Security Officer or

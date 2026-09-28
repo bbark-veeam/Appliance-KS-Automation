@@ -24,8 +24,20 @@ Record what it prints:
 | Field | Format | Notes |
 |-------|--------|-------|
 | `veeamadmin.mfaSecretKey` | 16-char Base32 | Enforced at first boot **if veeamadmin MFA is enabled** (always for hardened-repo; optional for proxy). Enroll it then. |
-| `veeamso.mfaSecretKey` | 16-char Base32 | MFA **always enforced** at first boot — the SO must enroll this on first login. |
+| `veeamso.mfaSecretKey` | 16-char Base32 | MFA **always enforced** at first boot — the SO must enroll this on first login. **Must differ from `veeamadmin.mfaSecretKey`** (see below). |
 | `veeamso.recoveryToken` | GUID (hex) | SO account recovery. **Store securely — it cannot be recovered later.** |
+
+> **The two MFA keys must differ.** A shared secret key means the *same* 6-digit
+> code satisfies MFA for both `veeamadmin` and the Security Officer, so one
+> authenticator entry covers both accounts and the separation the SO role exists to
+> provide is lost. `generate-secrets.sh` always produces two different keys; the rule
+> only matters if you supply your own. It is enforced by the builder, by
+> `build-appliance-iso.sh`, and by `check-credentials.sh`.
+>
+> Note this is deliberately stricter than the appliance, which does not check it.
+> A deliberately **fleet-wide shared key** — the same `veeamadmin` key on every
+> appliance you build — is still fully supported and unaffected; what is blocked is
+> sharing one key *between the two accounts*.
 
 ### B. Passwords + NTP + hostname — you set these (`<<SET_...>>` tokens)
 

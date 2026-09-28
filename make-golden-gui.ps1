@@ -1171,6 +1171,19 @@ function Update-Validation {
         $okAdminKey = Update-ByoPair $txtAdminKey $txtAdminKey2 $lblAdminKeyMsg 'b32'  $true
         $okSoKey    = Update-ByoPair $txtSoKey    $txtSoKey2    $lblSoKeyMsg    'b32'  $chkVeeamso.Checked
         $okSoTok    = Update-ByoPair $txtSoTok    $txtSoTok2    $lblSoTokMsg    'guid' $chkVeeamso.Checked
+        # The two accounts must not share a TOTP seed: one authenticator entry would then
+        # satisfy MFA for BOTH veeamadmin and the Security Officer, which defeats the point
+        # of the SO role. Mirrors the veeamadmin != veeamso password rule. Compared
+        # upper-cased, since the value is upper-cased before use. Only overrides a label
+        # that is otherwise passing, so a format/match error keeps its own message.
+        if ($okSoKey -and $chkVeeamso.Checked) {
+            $adminK = $txtAdminKey.Text.Trim().ToUpper()
+            $soK    = $txtSoKey.Text.Trim().ToUpper()
+            if ($adminK -and $soK -and $adminK -eq $soK) {
+                $lblSoKeyMsg.Text = 'must differ'; $lblSoKeyMsg.ForeColor = [System.Drawing.Color]::Firebrick
+                $okSoKey = $false
+            }
+        }
         $okByo = $okAdminKey -and $okSoKey -and $okSoTok
     } else {
         $lblAdminKeyMsg.Text = ''; $lblSoKeyMsg.Text = ''; $lblSoTokMsg.Text = ''
@@ -1377,6 +1390,7 @@ $btnBuild.Add_Click({
         if ($txtAdminKey2.Text.Trim() -ne $txtAdminKey.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show("The veeamadmin MFA key and its confirmation do not match.", "Keys do not match", 'OK', 'Warning') | Out-Null; return }
         if ($chkVeeamso.Checked -and $txtSoKey2.Text.Trim() -ne $txtSoKey.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show("The veeamso MFA key and its confirmation do not match.", "Keys do not match", 'OK', 'Warning') | Out-Null; return }
         if ($chkVeeamso.Checked -and $txtSoTok2.Text.Trim() -ne $txtSoTok.Text.Trim()) { [System.Windows.Forms.MessageBox]::Show("The veeamso recovery token and its confirmation do not match.", "Tokens do not match", 'OK', 'Warning') | Out-Null; return }
+        if ($chkVeeamso.Checked -and $txtAdminKey.Text.Trim() -and $txtSoKey.Text.Trim() -and ($txtAdminKey.Text.Trim().ToUpper() -eq $txtSoKey.Text.Trim().ToUpper())) { [System.Windows.Forms.MessageBox]::Show("The veeamadmin and veeamso MFA keys must differ. Sharing one TOTP seed means a single authenticator entry satisfies MFA for both accounts, which defeats the purpose of the separate Security Officer account.", "MFA keys must differ", 'OK', 'Warning') | Out-Null; return }
     }
 
     # ---- host-key type-to-confirm (DECISION 4) - BEFORE any credential leaves (SSH only) ----

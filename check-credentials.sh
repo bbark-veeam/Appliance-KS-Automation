@@ -129,6 +129,11 @@ fmt("veeamadmin.mfaSecretKey", r'[A-Z2-7]{16}', "16-char Base32")
 if so_enabled:
     fmt("veeamso.mfaSecretKey", r'[A-Z2-7]{16}', "16-char Base32")
     fmt("veeamso.recoveryToken", r'[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}', "GUID")
+    ak = get("veeamadmin.mfaSecretKey")
+    sk = get("veeamso.mfaSecretKey")
+    if ak and sk and '<<' not in (ak + sk) and ak.upper() == sk.upper():
+        problems.append("veeamadmin and veeamso MFA secret keys must DIFFER "
+                        "(one shared TOTP seed satisfies MFA for both accounts)")
 
 if get("veeamso.isEnabled") == "false" and get("veeamso.isMfaEnabled") == "true":
     problems.append("veeamso.isMfaEnabled=true while isEnabled=false (inconsistent)")
